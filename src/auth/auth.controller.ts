@@ -12,7 +12,7 @@ import {
 import type { Response } from "express";
 import { AuthService } from "./auth.service";
 import { JwtService } from "@nestjs/jwt";
-import type { SessionService } from "./services/session.service";
+import { SessionService } from "./services/session.service";
 import { LocalAuthGuard } from "./guards/local-auth.guard";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
 import { JwtRefreshAuthGuard } from "./guards/jwt-refresh-auth.guard";
