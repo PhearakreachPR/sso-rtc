@@ -1,38 +1,53 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
-import type { Model } from "mongoose";
-import type { Session } from "../schemas/session.schema";
+import { Model } from "mongoose";
+import { Session } from "../schemas/session.schema";
 import * as crypto from "crypto";
 
 @Injectable()
 export class SessionService {
-  constructor(@InjectModel('Session') private sessionModel: Model<Session>) {}
+  private readonly logger = new Logger(SessionService.name);
+
+  constructor(@InjectModel(Session.name) private sessionModel: Model<Session>) {}
 
   generateDeviceId(deviceInfo: any): string {
-    const deviceString = `${deviceInfo.userAgent}-${deviceInfo.ip}`;
+    const userAgent = deviceInfo?.userAgent || "unknown";
+    const ip = deviceInfo?.ip || "unknown";
+    const deviceString = `${userAgent}-${ip}`;
     return crypto.createHash("sha256").update(deviceString).digest("hex");
   }
 
   async createSession(userId: string, deviceInfo: any, tokens: any): Promise<Session> {
     const deviceId = this.generateDeviceId(deviceInfo);
+
+    // Deactivate previous sessions for same device
     await this.sessionModel.updateMany({ deviceId }, { isActive: false });
+
     const session = new this.sessionModel({
       userId,
       deviceId,
       deviceInfo,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
-    return session.save();
+
+    const saved = await session.save();
+    this.logger.debug(`Created session for user=${userId}, deviceId=${deviceId}`);
+    return saved;
   }
 
   async getSessionByToken(accessToken: string): Promise<Session | null> {
-    return this.sessionModel.findOne({
+    const session = await this.sessionModel.findOne({
       accessToken,
       isActive: true,
       expiresAt: { $gt: new Date() },
     });
+
+    if (!session) {
+      this.logger.warn(`No active session found for token`);
+    }
+    return session;
   }
 
   async getUserSessions(userId: string): Promise<Session[]> {
@@ -42,7 +57,10 @@ export class SessionService {
   }
 
   async updateActivity(sessionId: string): Promise<void> {
-    await this.sessionModel.updateOne({ _id: sessionId }, { lastActivity: new Date() });
+    await this.sessionModel.updateOne(
+      { _id: sessionId },
+      { lastActivity: new Date() }
+    );
   }
 
   async invalidateSession(accessToken: string): Promise<void> {

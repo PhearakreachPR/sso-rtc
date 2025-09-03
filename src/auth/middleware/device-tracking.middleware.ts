@@ -1,21 +1,21 @@
 import { Injectable, type NestMiddleware } from "@nestjs/common"
 import type { Request, Response, NextFunction } from "express"
+import { DeviceInfo } from "src/interfaces/device-info.interface";
 
 @Injectable()
 export class DeviceTrackingMiddleware implements NestMiddleware {
   use(req: Request, res: Response, next: NextFunction) {
-    const deviceInfo = {
+    const deviceInfo: DeviceInfo = {
       userAgent: req.headers["user-agent"] || "",
-      ip: req.ip || req.connection.remoteAddress || "",
+      ip: req.ip || req.connection?.remoteAddress || "",
       browser: this.getBrowser(req.headers["user-agent"] || ""),
       os: this.getOS(req.headers["user-agent"] || ""),
       device: this.getDevice(req.headers["user-agent"] || ""),
-    }
+    };
 
-    // Attach device info to request
-    ;(req as any).deviceInfo = deviceInfo
-    next()
-  }
+    (req as any).deviceInfo = deviceInfo;
+    next();
+    }
 
   private getBrowser(userAgent: string): string {
     if (userAgent.includes("Chrome")) return "Chrome"

@@ -11,26 +11,31 @@ async function bootstrap() {
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule)
 
-  //  Added handlebars view engine for SSO login page
+  // View engine for SSO login page
   app.setBaseViewsDir(join(__dirname, "..", "views"))
   app.setViewEngine("hbs")
 
   app.useGlobalPipes(new ValidationPipe())
   app.use(cookieParser())
 
+  // ✅ Allow multiple test websites + send cookies
   app.enableCors({
-    origin: "http://localhost:3001",
+    origin: [
+      "http://localhost:3001",
+      "http://127.0.0.1:5500",
+      "http://127.0.0.1:5501",
+    ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 
-  mongoose.connection.once('open', () => {
-    console.log('✅ Connected to MongoDB!')
+  mongoose.connection.once("open", () => {
+    console.log("✅ Connected to MongoDB!")
   })
-  
-  mongoose.connection.on('error', (err) => {
-    console.error('❌ MongoDB connection error:', err)
+
+  mongoose.connection.on("error", (err) => {
+    console.error("❌ MongoDB connection error:", err)
   })
 
   await app.listen(process.env.PORT ?? 3000)

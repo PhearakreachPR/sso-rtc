@@ -1,3 +1,4 @@
+
 import {
   Controller,
   Get,
@@ -12,12 +13,13 @@ import {
 import type { Response } from "express";
 import { AuthService } from "./auth.service";
 import { JwtService } from "@nestjs/jwt";
-import type { SessionService } from "./services/session.service";
+import { SessionService } from "./services/session.service";
 import { LocalAuthGuard } from "./guards/local-auth.guard";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
 import { JwtRefreshAuthGuard } from "./guards/jwt-refresh-auth.guard";
 import { CurrentUser } from "./current-user.decorator";
 import type { User } from "../users/schema/user.schema";
+import { DeviceInfo } from "src/interfaces/device-info.interface";
 
 class TokenLoginDto {
   token: string;
@@ -46,6 +48,7 @@ export class AuthController {
     @CurrentUser() user: User,
     @Body("returnUrl") returnUrl: string,
     @Res() res: Response,
+    @Req() req: any
   ) {
     try {
       const result = await this.authService.login(user, res);
@@ -54,6 +57,10 @@ export class AuthController {
         const redirectUrl = new URL(returnUrl);
         redirectUrl.searchParams.set("access_token", result.accessToken);
         redirectUrl.searchParams.set("user_id", result.user._id.toString());
+        
+        if (req.deviceInfo) {
+        redirectUrl.searchParams.set("device_info", JSON.stringify(req.deviceInfo));
+      }
         res.redirect(redirectUrl.toString());
         return;
       }
@@ -166,16 +173,42 @@ export class AuthController {
 
   // --- Device status ---
   @Get("device-status")
-  async checkDeviceStatus(@Req() req: any) {
-    const deviceInfo = req.deviceInfo;
-    const deviceId = this.sessionService.generateDeviceId(deviceInfo);
-    const hasActiveSession = await this.sessionService.hasActiveSession(deviceId);
+async checkDeviceStatus(@Req() req: { deviceInfo: DeviceInfo }) {
+  const deviceInfo = req.deviceInfo;
+  const deviceId = this.sessionService.generateDeviceId(deviceInfo);
+  const hasActiveSession = await this.sessionService.hasActiveSession(deviceId);
 
-    return {
-      deviceId,
-      hasActiveSession,
-      deviceInfo,
-    };
+  return {
+    deviceId,
+    hasActiveSession,
+    deviceInfo,
+  };
+}
+  @Get("verify")
+async verify(@Req() req: any, @Res() res: Response) {
+  const token = req.cookies?.Authentication || req.cookies?.sso_session;
+
+  if (!token) {
+    return res.status(401).json({ loggedIn: false });
+  }
+
+  try {
+    const payload = this.jwtService.verify(token, {
+      secret: process.env.JWT_ACCESS_TOKEN_SECRET,
+    });
+
+    return res.json({
+      loggedIn: true,
+      user: {
+        id: payload.userId || payload.sub,
+        email: payload.email,
+        roles: payload.roles,
+      },
+      accessToken: token,
+    });
+  } catch (err) {
+    return res.status(401).json({ loggedIn: false, message: "Invalid or expired token" });
+  }
   }
 
   // --- Helper ---
