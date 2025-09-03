@@ -12,14 +12,19 @@ export class JwtRefreshStrategy extends PassportStrategy(Strategy, 'jwt-refresh'
     private readonly configService: ConfigService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromBodyField('refreshToken'),
-      secretOrKey: configService.getOrThrow('JWT_REFRESH_TOKEN_SECRET'),
-      passReqToCallback: true,
-    });
+  jwtFromRequest: ExtractJwt.fromExtractors([
+    ExtractJwt.fromAuthHeaderAsBearerToken(),
+    ExtractJwt.fromBodyField('refreshToken'),
+  ]),
+  secretOrKey: configService.getOrThrow('JWT_REFRESH_TOKEN_SECRET'),
+  passReqToCallback: true,
+});
+
   }
 
   async validate(req: any, payload: { userId: string }) {
-    const refreshToken = req.body.refreshToken;
-    return { user: await this.authService.verifyRefreshToken(refreshToken, payload.userId), refreshToken };
+  const refreshToken = req.body.refreshToken || req.cookies?.Refresh;
+  const user = await this.authService.verifyRefreshToken(refreshToken, payload.userId);
+  return { ...user.toObject(), refreshToken }; 
   }
 }

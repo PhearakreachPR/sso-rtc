@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -11,6 +11,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy';
 import { SessionService } from './services/session.service';
 import { SessionSchema } from './schemas/session.schema';
+import { DeviceTrackingMiddleware } from './middleware/device-tracking.middleware';
 
 @Module({
   imports: [
@@ -39,4 +40,14 @@ import { SessionSchema } from './schemas/session.schema';
   ],
   exports: [AuthService, SessionService],
 })
-export class AuthModule {}
+export class AuthModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(DeviceTrackingMiddleware)
+      .forRoutes(
+        { path: 'auth/login', method: RequestMethod.POST },
+        { path: 'auth/device-status', method: RequestMethod.GET },
+        { path: 'auth/token-login', method: RequestMethod.POST }
+      );
+  }
+}

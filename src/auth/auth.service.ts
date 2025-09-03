@@ -8,6 +8,9 @@ import { Types } from "mongoose";
 import { User } from "../users/schema/user.schema";
 import { UsersService } from "../users/users.service";
 import { TokenPayload } from "./token-payload.interface";
+import { DeviceInfo } from "src/interfaces/device-info.interface";
+import { SessionService } from "./services/session.service";
+
 
 @Injectable()
 export class AuthService {
@@ -15,10 +18,13 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly configService: ConfigService,
     private readonly jwtService: JwtService,
+    private readonly sessionService: SessionService,
+
+
   ) {}
 
   // ----------------- LOGIN -----------------
-  async login(user: User, response: Response) {
+  async login(user: User, response: Response, deviceInfo?: DeviceInfo) {
     const expiresAccessToken = new Date(Date.now() + parseInt(this.configService.getOrThrow("JWT_ACCESS_TOKEN_EXPIRATION_MS")));
     const expiresRefreshToken = new Date(Date.now() + parseInt(this.configService.getOrThrow("JWT_REFRESH_TOKEN_EXPIRATION_MS")));
 
@@ -56,7 +62,7 @@ export class AuthService {
       expires: expiresRefreshToken,
     });
 
-    return { accessToken, refreshToken, user: await this.getSanitizedUser(user._id.toString()) };
+    return { user: await this.getSanitizedUser(user._id.toString()), accessToken, refreshToken};
   }
 
   // ----------------- TOKEN LOGIN -----------------
@@ -180,4 +186,18 @@ export class AuthService {
       return false;
     }
   }
+    async verify(token: string) {
+    try {
+      const decoded = this.jwtService.verify(token);
+      // ✅ Use usersService instead of userModel
+      const user = await this.usersService.getUser({ _id: new Types.ObjectId(decoded.sub) });
+      if (!user) throw new UnauthorizedException("User not found");
+
+      const { password, ...safeUser } = user.toObject();
+      return { valid: true, user: safeUser };
+    } catch (e) {
+      throw new UnauthorizedException("Invalid or expired token");
+    }
+  }
+
 }
