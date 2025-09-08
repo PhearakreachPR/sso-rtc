@@ -7,10 +7,10 @@ export class DeviceTrackingMiddleware implements NestMiddleware {
   use(req: Request, res: Response, next: NextFunction) {
     const deviceInfo: DeviceInfo = {
       userAgent: req.headers["user-agent"] || "",
-      ip: req.ip || req.connection?.remoteAddress || "",
+      ipAddress: req.ip || req.connection?.remoteAddress || "",
       browser: this.getBrowser(req.headers["user-agent"] || ""),
       os: this.getOS(req.headers["user-agent"] || ""),
-      device: this.getDevice(req.headers["user-agent"] || ""),
+      deviceId: this.getDevice(req.headers["user-agent"] || ""),
     };
 
     (req as any).deviceInfo = deviceInfo;

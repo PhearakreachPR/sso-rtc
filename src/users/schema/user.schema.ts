@@ -1,23 +1,49 @@
 // src/users/schema/user.schema.ts
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Types, SchemaTypes } from 'mongoose';
+import { Document, Types } from 'mongoose';
 
-@Schema()
+export type UserDocument = User & Document;
+
+@Schema({ timestamps: true })
 export class User {
-  @Prop({ type: SchemaTypes.ObjectId, auto: true })
+  [x: string]: any;
   _id: Types.ObjectId;
 
-  @Prop({ unique: true, required: true })
+  @Prop({ required: true, unique: true, lowercase: true, trim: true })
   email: string;
-
-  @Prop()
-  refreshToken?: string;
 
   @Prop({ required: true })
   password: string;
 
+  @Prop({ required: false, trim: true })
+  firstName?: string;
+
+  @Prop({ required: false, trim: true })
+  lastName?: string;
+
+  @Prop({ default: true })
+  isActive: boolean;
+
   @Prop({ type: [{ type: Types.ObjectId, ref: 'Role' }], default: [] })
   roles: Types.ObjectId[];
+
+  @Prop()
+  refreshToken?: string;
+
+  @Prop({ type: Date, default: Date.now })
+  createdAt: Date;
+
+  @Prop({ type: Date, default: Date.now })
+  updatedAt: Date;
+
+  @Prop()
+  lastLoginAt?: Date;
+
+  @Prop()
+  emailVerifiedAt?: Date;
+
+  @Prop({ default: false })
+  isEmailVerified: boolean;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

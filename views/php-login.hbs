@@ -1,0 +1,190 @@
+{{!-- views/php-login.hbs --}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login Single Sign-On</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 400px;
+            margin: 100px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 80vh;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        input {
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        button {
+            padding: 12px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #5a6fd8;
+        }
+        .error {
+            color: #d32f2f;
+            text-align: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #ffebee;
+            border-radius: 5px;
+        }
+        .success {
+            color: #388e3c;
+            text-align: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #e8f5e9;
+            border-radius: 5px;
+        }
+        .loading {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 SSO Login</h1>
+        
+        {{#if hasExistingSession}}
+        <div class="success">
+            Already logged in! Redirecting...
+        </div>
+        <div class="loading">
+            <div class="spinner"></div>
+        </div>
+        {{else}}
+        
+        {{#if error}}
+        <div class="error">
+            {{#if (eq error "1")}}
+                Invalid username or password. Please try again.
+            {{else}}
+                {{error}}
+            {{/if}}
+        </div>
+        {{/if}}
+
+        <form method="POST" action="/php-sso/login" id="loginForm">
+            <input type="hidden" name="redirect" value="{{redirect}}">
+            <input type="text" name="username" placeholder="Email Address" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit" id="loginBtn">Login</button>
+        </form>
+
+        <div id="loadingDiv" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Logging in...</p>
+        </div>
+        {{/if}}
+    </div>
+
+    <script>
+    {{#if hasExistingSession}}
+    // User already has session, handle auto-login
+    (function () {
+        var token = '{{{token}}}';
+        var redirect = '{{{redirect}}}';
+        
+        var fn = 'onLogin';
+        try {
+            if (window.opener && !window.opener.closed) {
+                window.opener.postMessage({ 
+                    type: fn, 
+                    token: { token: token }
+                }, '*');
+            }
+        } catch (e) {
+            console.warn('Login callback error:', e);
+        }
+        
+        // Handle redirect or close window
+        if (redirect) {
+            setTimeout(function() {
+                try { 
+                    window.location.href = decodeURIComponent(redirect);
+                } catch (_) {
+                    window.close();
+                }
+            }, 2000);
+        } else {
+            setTimeout(function() {
+                try { window.close(); } catch (_) {
+                    document.querySelector('.success').innerHTML = 'Login successful! You can close this window.';
+                }
+            }, 2000);
+        }
+    })();
+    {{else}}
+    // Handle form submission
+    document.getElementById('loginForm').addEventListener('submit', function() {
+        document.getElementById('loginBtn').textContent = 'Logging in...';
+        document.getElementById('loginBtn').disabled = true;
+        document.getElementById('loadingDiv').style.display = 'block';
+    });
+
+    // Handle any errors from the parent window
+    window.addEventListener('message', function(event) {
+        if (event.data && event.data.type === 'loginError') {
+            document.getElementById('loginBtn').textContent = 'Login';
+            document.getElementById('loginBtn').disabled = false;
+            document.getElementById('loadingDiv').style.display = 'none';
+            
+            var errorDiv = document.createElement('div');
+            errorDiv.className = 'error';
+            errorDiv.textContent = event.data.message || 'Login failed. Please try again.';
+            
+            var form = document.getElementById('loginForm');
+            form.parentNode.insertBefore(errorDiv, form);
+        }
+    });
+    {{/if}}
+    </script>
+</body>
+</html>

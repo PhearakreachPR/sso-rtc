@@ -1,8 +1,13 @@
+// src/interfaces/device-info.interface.ts
 export interface DeviceInfo {
-  userAgent: string;
-  ip: string;
-  browser: string;
-  os: string;
-  device: string;
-  platform?: string; // Optional: add if you want more detailed platform info
+  userAgent?: string;
+  platform?: string;
+  browser?: string;
+  version?: string;
+  deviceType?: 'mobile' | 'tablet' | 'desktop';
+  os?: string;
+  ipAddress?: string;
+  deviceId?: string;
+  appName?: string;
+  timestamp?: Date;
 }
