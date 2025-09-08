@@ -12,19 +12,21 @@ import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy';
 import { SessionService } from './services/session.service';
 import { SessionSchema } from './schemas/session.schema';
 import { DeviceTrackingMiddleware } from './middleware/device-tracking.middleware';
+import { EncryptionService } from './services/encryption.service';
+import { SSOService } from './services/sso.service';
 
 @Module({
   imports: [
     UsersModule,
     PassportModule,
     ConfigModule,
-    MongooseModule.forFeature([{ name: 'Session', schema: SessionSchema }]), // <-- Inject Session model
+    MongooseModule.forFeature([{ name: 'Session', schema: SessionSchema }]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({
         secret: configService.get('JWT_ACCESS_TOKEN_SECRET'),
         signOptions: { 
-          expiresIn: configService.get('JWT_ACCESS_TOKEN_EXPIRATION_MS') + 'ms'
+          expiresIn: configService.get('JWT_ACCESS_TOKEN_EXPIRATION', '15m') // Fixed: provide default value
         },
       }),
       inject: [ConfigService],
@@ -37,8 +39,15 @@ import { DeviceTrackingMiddleware } from './middleware/device-tracking.middlewar
     JwtStrategy,
     JwtRefreshStrategy,
     SessionService,
+    EncryptionService,
+    SSOService, // This should work now
   ],
-  exports: [AuthService, SessionService],
+  exports: [
+    AuthService, 
+    SessionService,
+    SSOService, // Also export SSOService if other modules need it
+    JwtModule, // Export JwtModule if needed
+  ],
 })
 export class AuthModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
