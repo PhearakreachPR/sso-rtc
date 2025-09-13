@@ -14,9 +14,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromExtractors([
-        // 1) Extract from cookie
+        // 1) Check "token" cookie (PHP-style)
+        (request: Request) => request?.cookies?.token,
+        // 2) Check "Authentication" cookie (NestJS style)
         (request: Request) => request?.cookies?.Authentication,
-        // 2) Extract from Bearer token
+        // 3) Check Bearer token
         ExtractJwt.fromAuthHeaderAsBearerToken(),
       ]),
       ignoreExpiration: false,
@@ -25,15 +27,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
+    // payload is what you signed in AuthService.login()
     const user = await this.usersService.getUser({ _id: payload.userId });
     if (!user) {
       throw new UnauthorizedException("User not found or token invalid");
     }
 
     return {
-      _id: user._id,
+      _id: user._id.toString(),
       email: user.email,
-      roles: user.roles,
+      roles: user.roles?.map(r => r.toString?.() ?? r) || [],
     };
   }
 }

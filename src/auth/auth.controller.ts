@@ -11,6 +11,7 @@ import {
   UnauthorizedException,
   BadRequestException,
 } from "@nestjs/common";
+import type { Request, Response } from "express";
 import { AuthService } from "./auth.service";
 import { JwtService } from "@nestjs/jwt";
 import { SessionService } from "./services/session.service";
@@ -24,25 +25,28 @@ import { createUserRequest } from "src/users/dto/create-user.request";
 import { SSOService } from "./services/sso.service";
 import { ConfigService } from "@nestjs/config";
 import { UsersService } from "src/users/users.service";
-import type { Response, Request } from "express";
+import { EncryptionService } from './services/encryption.service';
 
-class TokenLoginDto {
-  token: string;
-  type: "access" | "refresh";
-}
-
+// DTOs
 export class LoginDto {
   email: string;
   password: string;
   returnUrl?: string;
 }
 
-interface RequestWithCookies extends Request {
+class TokenLoginDto {
+  token: string;
+  type: "access" | "refresh";
+}
+
+interface CustomRequest extends Request {
+  deviceInfo?: DeviceInfo;
   cookies: Record<string, string>;
 }
 
 @Controller("auth")
 export class AuthController {
+  [x: string]: any;
   constructor(
     private readonly authService: AuthService,
     private readonly jwtService: JwtService,
@@ -51,370 +55,636 @@ export class AuthController {
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
   ) {}
-
-  @Get("test")
-  test() {
-    return {
-      message: "Auth controller working",
-      timestamp: new Date(),
-      sso_enabled: true,
-    };
-  }
-
   // --- Register user ---
   @Post("register")
   async register(
     @Body() registerDto: createUserRequest,
-    @Res({ passthrough: true }) res: Response,
+    @Res() res: Response,
+    @Req() req: Request
   ) {
     try {
       const user = await this.authService.register(registerDto);
+      
+      // Auto-login after successful registration
       const result = await this.authService.login(user, res);
-      await this.createEncryptedSSOSession(user, res);
 
-      return {
-        success: true,
+      return res.json({
         message: "User registered successfully",
         user: result.user,
         accessToken: result.accessToken,
-        refreshToken: result.refreshToken,
-      };
+        // refreshToken: result.refreshToken
+      });
     } catch (error) {
-      throw new BadRequestException(`Registration failed: ${error.message}`);
+      return res.status(400).json({
+        message: "Registration failed",
+        error: error.message
+      });
     }
   }
 
-  // --- Enhanced SSO Check with encrypted cookies ---
-  @Get("sso-check")
-  async ssoCheck(
-    @Req() req: RequestWithCookies,
-    @Res({ passthrough: true }) res: Response,
-    @Query("returnUrl") returnUrl?: string,
-    @Query("targetDomain") targetDomain?: string,
-  ) {
-    try {
-      const encryptedToken = req.cookies?.sso_token;
-
-      if (encryptedToken) {
-        try {
-          const token = this.decryptToken(encryptedToken);
-          const isValid = await this.authService.verifyAccessToken(token);
-
-          if (isValid) {
-            const userInfo = await this.getUserFromToken(token); // userId is string now
-
-            if (returnUrl) {
-              const redirectUrl = new URL(returnUrl);
-              redirectUrl.searchParams.set("access_token", token);
-              redirectUrl.searchParams.set("user_id", userInfo.userId); // string
-              return {
-                success: true,
-                authenticated: true,
-                user: userInfo,
-                redirectUrl: redirectUrl.toString(),
-                message: "Auto-logged in via encrypted SSO cookie",
-              };
-            }
-
-            return {
-              success: true,
-              authenticated: true,
-              user: userInfo,
-              accessToken: token,
-              message: "Valid SSO session found",
-            };
-          }
-        } catch (decryptError: any) {
-          console.warn("Failed to decrypt SSO token:", decryptError.message);
-          res.clearCookie("sso_token");
-        }
-      }
-
-      const ssoResult = await this.ssoService.autoLoginFromSSO(req, res, returnUrl);
-
-      if (ssoResult.success) {
-        return {
-          success: true,
-          authenticated: true,
-          user: ssoResult.user,
-          accessToken: ssoResult.tokens?.accessToken,
-          redirectUrl: ssoResult.redirectUrl,
-          message: "Auto-logged in via SSO service",
-        };
-      }
-
-      return {
+  // --- Enhanced SSO Check (like PHP session/cookie check) ---
+// --- Enhanced SSO Check with optional auto-login ---
+@Get("sso-check")
+async ssoCheck(
+  @Req() req: CustomRequest,
+  @Res() res: Response,
+  @Query("returnUrl") returnUrl?: string,
+  @Query("autoLogin") autoLogin?: string,
+) {
+  try {
+    // Only proceed if autoLogin is explicitly true
+    if (autoLogin !== 'true') {
+      return res.json({
         success: false,
         authenticated: false,
-        loginUrl: `/auth/login${returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : ""}`,
-        message: "No valid SSO session found",
-      };
-    } catch (error) {
-      console.error("SSO check failed:", error);
-      return {
-        success: false,
-        authenticated: false,
-        loginUrl: `/auth/login${returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : ""}`,
-        message: "SSO check failed",
-      };
+        message: "Auto-login not enabled"
+      });
     }
+
+    const token = req.cookies?.sso_token;
+    if (!token) {
+      return res.json({
+        success: false,
+        authenticated: false,
+        message: "No SSO token found"
+      });
+    }
+
+    // Validate token
+    const isValid = await this.authService.verifyAccessToken(token);
+    if (!isValid) {
+      return res.json({
+        success: false,
+        authenticated: false,
+        message: "Invalid token"
+      });
+    }
+
+    const userInfo = await this.authService.getUserFromToken(token);
+    
+    if (returnUrl) {
+      const redirectUrl = `${returnUrl}?token=${token}&autoLogin=true`;
+      return res.json({
+        success: true,
+        authenticated: true,
+        user: userInfo,
+        redirectUrl: redirectUrl,
+        message: "Auto-login successful"
+      });
+    }
+
+    return res.json({
+      success: true,
+      authenticated: true,
+      user: userInfo
+    });
+
+  } catch (error) {
+    return res.json({
+      success: false,
+      authenticated: false,
+      message: "SSO check failed"
+    });
   }
+}
+
 
   // --- Login page ---
-  @Get("login")
-  @Render("login")
-  showLoginPage(@Query("returnUrl") returnUrl?: string, @Query("error") error?: string) {
+  // GET route to show login page
+  @Get('login')
+  @Render('login')
+  showLoginPage(@Query('returnUrl') returnUrl?: string, @Query('error') error?: string) {
     return { returnUrl, error };
   }
 
-  // --- Enhanced Login with encrypted SSO cookie ---
-  @Post("login")
+  // POST route for login - returns JSON or redirects based on returnUrl
+  @Post('login')
   @UseGuards(LocalAuthGuard)
   async login(
-    @CurrentUser() user: User,
-    @Body("returnUrl") returnUrl: string,
-    @Res({ passthrough: true }) res: Response,
-    @Req() req: any,
+    @CurrentUser() user: any,
+    @Body('returnUrl') returnUrl: string,
+    @Res({ passthrough: false }) res: Response,
   ) {
     try {
       const result = await this.authService.login(user, res);
-      const originDomain = req.get("host") || "localhost";
-      await this.ssoService.createSSOSession(user, res, originDomain);
-      await this.createEncryptedSSOSession(user, res);
-
+      
       if (returnUrl) {
-        const validatedUrl = await this.authService.validateReturnUrl(returnUrl);
-        if (validatedUrl) {
-          const redirectUrl = new URL(validatedUrl);
-          redirectUrl.searchParams.set("access_token", result.accessToken);
-          redirectUrl.searchParams.set("user_id", result.user._id.toString());
-          if (req.deviceInfo) {
-            redirectUrl.searchParams.set("device_info", JSON.stringify(req.deviceInfo));
-          }
-          return {
-            success: true,
-            message: "Login successful",
-            redirectUrl: redirectUrl.toString(),
-            ...result,
-          };
-        }
+        // SSO redirect with tokens
+        const redirectUrl = `${returnUrl}?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}`;
+        return res.redirect(redirectUrl);
+      } else {
+        // No returnUrl, redirect to success page or dashboard
+        return res.redirect('/dashboard?message=Login successful');
       }
-
-      return {
-        success: true,
-        message: "Login successful",
-        ...result,
-      };
-    } catch (error: any) {
-      throw new UnauthorizedException(`Login failed: ${error.message}`);
+    } catch (error) {
+      // Redirect back to login with error
+      const errorUrl = `/auth/login${returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : ''}`;
+      return res.redirect(`${errorUrl}&error=${encodeURIComponent('Login failed')}`);
     }
   }
 
-  // --- API Login endpoint ---
-  @Post("api-login")
-  async apiLogin(@Body() loginDto: LoginDto, @Res({ passthrough: true }) res: Response) {
-    try {
-      if (!loginDto.email || !loginDto.password) {
-        throw new BadRequestException("Email and password are required");
-      }
 
-      const user = await this.authService.validateUser(loginDto.email, loginDto.password);
-      if (!user) throw new UnauthorizedException("Invalid email or password");
+  // --- Login with LocalAuthGuard ---
+//  @Post("login")
+//   @UseGuards(LocalAuthGuard)
+//   async login(
+//     @CurrentUser() user: User,
+//     @Body("returnUrl") returnUrl: string,
+//     @Res() res: Response,
+//   ) {
+//     try {
+//       const result = await this.authService.login(user, res);
+      
+//       if (returnUrl) {
+//         // Simple redirect with token in URL
+//         const redirectUrl = `${returnUrl}?token=${result.accessToken}&user_id=${result.user._id}`;
+//         return res.redirect(redirectUrl);
+//       }
 
-      const result = await this.authService.login(user, res);
-      await this.createEncryptedSSOSession(user, res);
+//       return res.json(result);
+//     } catch (error) {
+//       const loginUrl = `/auth/login?error=${encodeURIComponent("Login failed")}`;
+//       if (returnUrl) {
+//         return res.redirect(`${loginUrl}&returnUrl=${encodeURIComponent(returnUrl)}`);
+//       }
+//       return res.redirect(loginUrl);
+//     }
+//   }
+// @Post("login")
+// @UseGuards(LocalAuthGuard)
+// async login(
+//   @CurrentUser() user: User,
+//   @Body("returnUrl") returnUrl: string,
+//   @Res() res: Response,
+// ) {
+//   try {
+//     // Use generateTokens instead of generateAccessToken
+//     const tokens = await this.authService.generateTokens(user);
+//     const accessToken = tokens.accessToken;
 
-      if (loginDto.returnUrl) {
-        const validatedUrl = await this.authService.validateReturnUrl(loginDto.returnUrl);
-        if (validatedUrl) {
-          const redirectUrl = new URL(validatedUrl);
-          redirectUrl.searchParams.set("access_token", result.accessToken);
-          redirectUrl.searchParams.set("user_id", result.user._id.toString());
-          return {
-            success: true,
-            message: "Login successful",
-            redirectUrl: redirectUrl.toString(),
-            ...result,
-          };
-        }
-      }
+//     const isProd = process.env.NODE_ENV === 'production';
+//     res.cookie('sso_token', accessToken, {
+//       httpOnly: true,
+//       secure: isProd,
+//       sameSite: isProd ? 'none' : 'lax',
+//       maxAge: 1000 * 60 * 60,
+//       path: '/',
+//     });
 
-      return {
-        success: true,
-        message: "Login successful",
-        ...result,
-      };
-    } catch (error: any) {
-      if (error instanceof UnauthorizedException || error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new UnauthorizedException(`Login failed: ${error.message}`);
+//     if (returnUrl) {
+//       return res.redirect(returnUrl);
+//     }
+
+//     return res.json({
+//       success: true,
+//       message: "Logged in successfully",
+//       user: {
+//         id: user._id,
+//         email: user.email,
+//       },
+//     });
+//   } catch (error) {
+//     console.error("Login error:", error);
+//     return res.status(401).json({ success: false, message: "Login failed" });
+//   }
+// }
+
+  // --- Enhanced SSO Status ---
+  // @Get("sso-status")
+  // async checkSSOStatus(@Req() req: CustomRequest) {
+  //   try {
+  //     // Check encrypted cookie first (PHP-style)
+  //     const encryptedToken = req.cookies?.sso_token;
+      
+  //     if (encryptedToken) {
+  //       try {
+  //         // Use EncryptionService directly to decrypt the JWT token string
+  //         const token = this.encryptionService.decryptString(encryptedToken);
+  //         const payload = this.jwtService.verify(token, {
+  //           secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+  //         });
+          
+  //         const user = await this.usersService.getUser({ _id: payload.userId });
+          
+  //         if (user) {
+  //           return {
+  //             isLoggedIn: true,
+  //             user: {
+  //               id: user._id,
+  //               email: user.email,
+  //             },
+  //             expiresAt: new Date(payload.exp * 1000),
+  //             source: 'encrypted_cookie'
+  //           };
+  //         }
+  //       } catch (error) {
+  //         console.warn('Invalid encrypted SSO token:', error.message);
+  //       }
+  //     }
+
+  //     // Fallback to original SSO service
+  //     const ssoPayload = await this.ssoService.checkSSOSession(req);
+      
+  //     if (ssoPayload) {
+  //       return {
+  //         isLoggedIn: true,
+  //         user: {
+  //           id: ssoPayload.userId,
+  //           email: ssoPayload.email,
+  //           firstName: ssoPayload.firstName,
+  //           lastName: ssoPayload.lastName,
+  //           roles: ssoPayload.roles
+  //         },
+  //         expiresAt: new Date(ssoPayload.exp),
+  //         source: 'sso_service'
+  //       };
+  //     } else {
+  //       return {
+  //         isLoggedIn: false
+  //       };
+  //     }
+  //   } catch (error) {
+  //     return {
+  //       isLoggedIn: false,
+  //       error: error.message
+  //     };
+  //   }
+  // }
+// @Post("login")
+// @UseGuards(LocalAuthGuard)
+// async login(
+//   @CurrentUser() user: User,
+//   @Body("returnUrl") returnUrl: string,
+//   @Res() res: Response,
+// ) {
+//   try {
+//     const tokens = await this.authService.generateTokens(user);
+
+//     // Set cookies
+//     res.cookie('Authentication', tokens.accessToken, { httpOnly: true, path: '/' });
+//     res.cookie('Refresh', tokens.refreshToken, { httpOnly: true, path: '/' });
+//     res.cookie('sso_token', tokens.accessToken, { 
+//       httpOnly: false, 
+//       path: '/',
+//       sameSite: 'none',
+//       secure: process.env.NODE_ENV === 'production'
+//     });
+
+//     if (returnUrl) {
+//       // PROPERLY format the redirect URL with ALL required parameters
+//       const url = new URL(returnUrl);
+//       url.searchParams.set('token', tokens.accessToken);
+//       url.searchParams.set('user_id', user._id.toString()); // ← MAKE SURE THIS IS INCLUDED
+//       url.searchParams.set('autoLogin', 'true');
+      
+//       console.log('Redirecting to:', url.toString());
+//       return res.redirect(url.toString());
+//     }
+
+//     return res.json({ user, ...tokens });
+//   } catch (error) {
+//     console.error('Login error:', error);
+//     return res.redirect(`/auth/login?error=${encodeURIComponent("Login failed")}`);
+//   }
+// }
+@Get("user-info")
+async getUserInfo(@Query('token') token: string) {
+  try {
+    const payload = this.jwtService.verify(token, {
+      secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+    });
+    
+    const user = await this.usersService.findOneById(payload.userId);
+    if (!user) {
+      return { error: "User not found" };
     }
+    
+    return {
+      id: user._id.toString(),
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName
+    };
+  } catch (error) {
+    return { error: "Invalid token" };
   }
-
-  // --- Enhanced SSO Status Check ---
-  @Get("sso-status")
-  async checkSSOStatus(@Req() req: RequestWithCookies) {
-    try {
-      const encryptedToken = req.cookies?.sso_token;
-
-      if (encryptedToken) {
-        try {
-          const token = this.decryptToken(encryptedToken);
-          const payload = this.jwtService.verify(token, {
-            secret: this.configService.get("JWT_ACCESS_TOKEN_SECRET"),
-          });
-
-          const user = await this.usersService.getUser({ _id: payload.userId });
-
-          if (user) {
-            return {
-              isLoggedIn: true,
-              user: {
-                id: user._id.toString(), // <-- string
-                email: user.email,
-              },
-              expiresAt: new Date(payload.exp * 1000),
-              source: "encrypted_cookie",
-            };
-          }
-        } catch (error: any) {
-          console.warn("Invalid encrypted SSO token:", error.message);
-        }
-      }
-
-      const ssoPayload = await this.ssoService.checkSSOSession(req);
-
-      if (ssoPayload) {
-        return {
-          isLoggedIn: true,
-          user: {
-            id: String(ssoPayload.userId),
-            email: ssoPayload.email,
-            firstName: ssoPayload.firstName,
-            lastName: ssoPayload.lastName,
-            roles: ssoPayload.roles,
-          },
-          expiresAt: new Date(ssoPayload.exp),
-          source: "sso_service",
-        };
-      }
-
-      return { isLoggedIn: false };
-    } catch (error: any) {
-      return {
-        isLoggedIn: false,
-        error: error.message,
-      };
-    }
-  }
-
-  // --- Simple Token Verification ---
-  @Get("check-token")
-  async checkToken(
-    @Query("token") token: string,
-    @Query("device_info") deviceInfo?: string,
-    @Query("app_name") appName?: string,
+}
+  @Post("sso-login")
+  async ssoAutoLogin(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Body("returnUrl") returnUrl?: string
   ) {
+    try {
+      const result = await this.ssoService.autoLoginFromSSO(req, res, returnUrl);
+      
+      if (result.success) {
+        if (returnUrl && result.redirectUrl) {
+          return res.redirect(result.redirectUrl);
+        } else {
+          return res.json({
+            success: true,
+            user: result.user,
+            accessToken: result.tokens?.accessToken,
+            refreshToken: result.tokens?.refreshToken
+          });
+        }
+      } else {
+        return res.status(401).json({
+          success: false,
+          message: "No valid SSO session found"
+        });
+      }
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: "SSO auto-login failed",
+        error: error.message
+      });
+    }
+  }
+
+  // --- Refresh token ---
+  @Post("refresh")
+  @UseGuards(JwtRefreshAuthGuard)
+  async refreshToken(@CurrentUser() user: User, @Res() res: Response) {
+    const result = await this.authService.refresh(user, res);
+    return res.json(result);
+  }
+
+  // --- Token-login ---
+  @Post("token-login")
+  async loginWithToken(@Body() body: TokenLoginDto, @Res() res: Response) {
+    const { token, type } = body;
+    const result = await this.authService.loginWithToken(token, type, res);
+    return res.json(result);
+  }
+
+  // --- Verify token ---
+@Get("verify-token")
+async verifyTokenForPHP(@Query('token') token: string, @Req() req: Request) {
+  console.log('🔐 Token verification request received');
+  console.log('Request URL:', req.url);
+  console.log('Query parameters:', req.query);
+  console.log('HTTP Method:', req.method);
+  
+  // Handle OPTIONS requests (CORS preflight)
+  if (req.method === 'OPTIONS') {
+    return { valid: false, message: "Preflight request" };
+  }
+
+  if (!token) {
+    console.log('❌ No token provided in query parameters');
+    console.log('Full request details:', {
+      url: req.url,
+      method: req.method,
+      headers: req.headers,
+      query: req.query
+    });
+    return { valid: false, message: "No token provided" };
+  }
+
+  // Remove "Bearer " prefix if present
+  if (token.startsWith('Bearer ')) {
+    token = token.substring(7);
+  }
+
+  try {
+    const isValid = await this.authService.verifyAccessToken(token);
+    console.log('✅ Token valid:', isValid);
+    return { valid: isValid };
+  } catch (error) {
+    console.log('❌ Token verification failed:', error.message);
+    return { valid: false, message: "Token verification failed" };
+  }
+}
+@Get("debug-verify")
+async debugVerify(@Query('token') token: string, @Req() req: Request) {
+  console.log('=== DEBUG TOKEN VERIFICATION ===');
+  
+  // Get token from query or header
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    }
+  }
+
+  if (!token) {
+    return { error: "No token provided" };
+  }
+
+  console.log('Token received:', token.substring(0, 50) + '...');
+  
+  try {
+    // 1. First test pure JWT verification
+    const secret = this.configService.get('JWT_ACCESS_TOKEN_SECRET');
+    console.log('JWT Secret available:', !!secret);
+    
+    const payload = this.jwtService.verify(token, { secret });
+    console.log('✅ Pure JWT verification successful:', payload);
+    
+    // 2. Test user lookup
+    const user = await this.usersService.findOneById(payload.userId);
+    console.log('User found:', !!user);
+    
+    if (!user) {
+      return { 
+        valid: false, 
+        reason: "User not found", 
+        userId: payload.userId,
+        jwtValid: true 
+      };
+    }
+    
+    // 3. Check user status
+    const userObj = this.toPlainObject(user);
+    const isActive = userObj.isActive !== false;
+    console.log('User active:', isActive);
+    
+    if (!isActive) {
+      return { 
+        valid: false, 
+        reason: "User not active", 
+        userId: payload.userId,
+        jwtValid: true,
+        userFound: true
+      };
+    }
+    
+    return { 
+      valid: true, 
+      user: { id: user._id, email: userObj.email, active: isActive },
+      jwtValid: true,
+      userFound: true,
+      userActive: true
+    };
+    
+  } catch (error) {
+    console.log('❌ Verification failed:', error.message);
+    
+    if (error.name === 'JsonWebTokenError') {
+      return { 
+        valid: false, 
+        reason: "JWT Error", 
+        error: error.message,
+        possibleCause: "Secret mismatch or invalid token format"
+      };
+    }
+    
+    if (error.name === 'TokenExpiredError') {
+      return { 
+        valid: false, 
+        reason: "Token Expired", 
+        error: error.message,
+        expiredAt: error.expiredAt
+      };
+    }
+    
+    return { 
+      valid: false, 
+      reason: "Other Error", 
+      error: error.message 
+    };
+  }
+}
+@Get("check-cookie")
+checkCookie(@Req() req: Request) {
+  const ssoToken = req.cookies?.sso_token;
+  const authToken = req.cookies?.Authentication;
+  
+  console.log('🍪 SSO Token from cookie:', ssoToken);
+  console.log('📏 SSO Token length:', ssoToken?.length);
+  console.log('🔢 SSO Token parts:', ssoToken?.split('.').length);
+  
+  console.log('🍪 Auth Token from cookie:', authToken);
+  console.log('📏 Auth Token length:', authToken?.length);
+  console.log('🔢 Auth Token parts:', authToken?.split('.').length);
+  
+  return {
+    ssoToken: {
+      exists: !!ssoToken,
+      length: ssoToken?.length,
+      parts: ssoToken?.split('.').length,
+      preview: ssoToken ? ssoToken.substring(0, 50) + '...' : null
+    },
+    authToken: {
+      exists: !!authToken,
+      length: authToken?.length,
+      parts: authToken?.split('.').length,
+      preview: authToken ? authToken.substring(0, 50) + '...' : null
+    }
+  };
+}
+@Get("inspect-token")
+inspectToken(@Query('token') token: string, @Req() req: Request) {
+  // Get token from header if not in query
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    }
+  }
+
+  if (!token) {
+    return { error: "No token provided" };
+  }
+
+  console.log('=== TOKEN INSPECTION ===');
+  console.log('Full token:', token);
+  console.log('Token length:', token.length);
+  console.log('Token parts:', token.split('.').length);
+  
+  // Check if it looks like a JWT
+  const parts = token.split('.');
+  const isJWTFormat = parts.length === 3;
+  
+  let header, payload;
+  try {
+    if (parts.length >= 1) header = JSON.parse(Buffer.from(parts[0], 'base64').toString());
+    if (parts.length >= 2) payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+  } catch (e) {
+    console.log('Failed to parse JWT parts:', e.message);
+  }
+
+  return {
+    tokenLength: token.length,
+    partsCount: parts.length,
+    isJWTFormat: isJWTFormat,
+    header: header,
+    payload: payload,
+    first50Chars: token.substring(0, 50),
+    last50Chars: token.substring(token.length - 50)
+  };
+}
+@Get("generate-test-token")
+generateTestToken() {
+  const payload = { 
+    userId: '68b931b5321c0629a7881546', 
+    email: 'test@example.com',
+    timestamp: Date.now()
+  };
+  
+  const token = this.jwtService.sign(payload, {
+    secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET'),
+    expiresIn: '1h'
+  });
+  
+  console.log('Generated token length:', token.length);
+  console.log('Generated token parts:', token.split('.').length);
+  
+  return {
+    token: token,
+    length: token.length,
+    parts: token.split('.').length,
+    header: JSON.parse(Buffer.from(token.split('.')[0], 'base64').toString()),
+    payload: JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString())
+  };
+}
+  // --- Enhanced token checking ---
+   @Get("check-token")
+  async checkToken(@Query('token') token: string) {
     if (!token) {
       return { valid: false, message: "No token provided" };
     }
 
     try {
       const payload = this.jwtService.verify(token, {
-        secret: this.configService.get("JWT_ACCESS_TOKEN_SECRET"),
+        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
       });
-
+      
       const user = await this.usersService.getUser({ _id: payload.userId });
-      if (!user) return { valid: false, message: "User not found" };
-
-      if (deviceInfo || appName) {
-        await this.authService.logDeviceAccess(user._id.toString(), {
-          deviceInfo,
-          appName,
-          accessTime: new Date(),
-        });
+      
+      if (!user) {
+        return { valid: false, message: "User not found" };
       }
-
+      
       return {
         valid: true,
         user: {
-          id: user._id.toString(), // <-- string
+          id: user._id,
           email: user.email,
         },
-        message: "Token is valid",
-        device_info: deviceInfo,
-        app_name: appName,
+        message: "Token is valid"
       };
-    } catch {
+    } catch (error) {
       return { valid: false, message: "Invalid or expired token" };
     }
   }
 
-  @Post("sso-login")
-  async ssoAutoLogin(
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-    @Body("returnUrl") returnUrl?: string,
-  ) {
-    try {
-      const result = await this.ssoService.autoLoginFromSSO(req, res, returnUrl);
 
-      if (result.success) {
-        if (returnUrl && result.redirectUrl) {
-          return { success: true, redirectUrl: result.redirectUrl };
-        } else {
-          return {
-            success: true,
-            user: result.user,
-            accessToken: result.tokens?.accessToken,
-            refreshToken: result.tokens?.refreshToken,
-          };
-        }
-      } else {
-        throw new UnauthorizedException("No valid SSO session found");
-      }
-    } catch (error: any) {
-      throw new UnauthorizedException(`SSO auto-login failed: ${error.message}`);
-    }
-  }
-
-  @Post("refresh")
-  @UseGuards(JwtRefreshAuthGuard)
-  async refreshToken(@CurrentUser() user: User, @Res({ passthrough: true }) res: Response) {
-    const result = await this.authService.refresh(user, res);
-    return result;
-  }
-
-  @Post("token-login")
-  async loginWithToken(@Body() body: TokenLoginDto, @Res({ passthrough: true }) res: Response) {
-    const { token, type } = body;
-    const result = await this.authService.loginWithToken(token, type, res);
-    return result;
-  }
-
-  @Get("verify-token")
-  @UseGuards(JwtAuthGuard)
-  verifyToken(@CurrentUser() user: any) {
-    return {
-      valid: true,
-      user: {
-        id: user.sub,
-        email: user.email,
-        roles: user.roles,
-      },
-      message: "Token is valid",
-    };
-  }
-
+  // --- Token status ---
   @Get("token-status")
-  checkTokenStatus(@Req() req: any) {
+  checkTokenStatus(@Req() req: Request) {
     const token = this.extractTokenFromHeader(req);
-    if (!token) return { isLoggedIn: false, message: "No token provided" };
+
+    if (!token) {
+      return { isLoggedIn: false, message: "No token provided" };
+    }
 
     try {
       const payload = this.jwtService.verify(token, {
-        secret: this.configService.get("JWT_ACCESS_TOKEN_SECRET"),
+        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
       });
       return {
         isLoggedIn: true,
@@ -425,7 +695,7 @@ export class AuthController {
         },
         expiresAt: new Date(payload.exp * 1000),
       };
-    } catch (error: any) {
+    } catch (error) {
       return {
         isLoggedIn: false,
         message: "Invalid or expired token",
@@ -434,6 +704,7 @@ export class AuthController {
     }
   }
 
+  // --- Sessions ---
   @Get("sessions")
   @UseGuards(JwtAuthGuard)
   async getUserSessions(@CurrentUser() user: any) {
@@ -448,96 +719,20 @@ export class AuthController {
       })),
     };
   }
-@Get("logout")
-async getLogout(
-  @Req() req: Request,
-  @Res() res: Response,
-  @Query("redirect") redirect?: string,
-) {
-  try {
-    // Invalidate session token if provided
-    const token = this.extractTokenFromHeader(req);
-    if (token) {
-      await this.sessionService.invalidateSession(token);
-    }
-
-    // Clear SSO + cookies
-    await this.ssoService.clearSSOSession(res);
-    this.clearEncryptedSSOCookie(res);
-    res.clearCookie("Authentication");
-    res.clearCookie("Refresh");
-
-    // Redirect if provided
-    if (redirect) {
-      return res.redirect(redirect);
-    }
-
-    return res.json({ success: true, message: "Logged out successfully" });
-  } catch (error: any) {
-    console.error("Logout failed:", error.message);
-    return res.json({ success: false, message: "Logout failed", error: error.message });
-  }
-}
-  @Post("logout")
-  @UseGuards(JwtAuthGuard)
-  async logout(@Req() req: any, @Res({ passthrough: true }) res: Response) {
-    try {
-      const token = this.extractTokenFromHeader(req);
-      if (token) await this.sessionService.invalidateSession(token);
-
-      await this.ssoService.clearSSOSession(res);
-      this.clearEncryptedSSOCookie(res);
-
-      res.clearCookie("Authentication");
-      res.clearCookie("Refresh");
-
-      return { success: true, message: "Logged out successfully from all sites" };
-    } catch {
-      return { success: true, message: "Logged out successfully" };
-    }
-  }
-
-  @Post("sso-refresh")
-  async refreshSSO(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    try {
-      const success = await this.ssoService.refreshSSOSession(req, res);
-      if (success) return { success: true, message: "SSO session refreshed" };
-      throw new UnauthorizedException("No valid SSO session");
-    } catch (error: any) {
-      throw new UnauthorizedException(`SSO refresh failed: ${error.message}`);
-    }
-  }
-
-  @Get("sso-login-url")
-  getSSOLoginUrl(@Query("targetDomain") targetDomain: string, @Query("returnUrl") returnUrl?: string) {
-    const loginUrl = this.ssoService.generateSSOLoginUrl(targetDomain, returnUrl);
-    return { loginUrl };
-  }
-
-  @Get("device-status")
-  async checkDeviceStatus(@Req() req: { deviceInfo: DeviceInfo }) {
-    const deviceInfo = req.deviceInfo;
-    const deviceId = this.sessionService.generateDeviceId(deviceInfo);
-    const hasActiveSession = await this.sessionService.hasActiveSession(deviceId);
-
-    return {
-      deviceId,
-      hasActiveSession,
-      deviceInfo,
-    };
-  }
-
-  @Get("verify")
-  async verify(@Req() req: any, @Res({ passthrough: true }) res: Response) {
+ @Get("verify")
+  async verify(@Req() req: CustomRequest, @Res() res: Response) {
     const token = req.cookies?.Authentication || req.cookies?.sso_session;
-    if (!token) return { loggedIn: false };
+
+    if (!token) {
+      return res.status(401).json({ loggedIn: false });
+    }
 
     try {
       const payload = this.jwtService.verify(token, {
-        secret: this.configService.get("JWT_ACCESS_TOKEN_SECRET"),
+        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET'),
       });
 
-      return {
+      return res.json({
         loggedIn: true,
         user: {
           id: payload.userId || payload.sub,
@@ -545,90 +740,206 @@ async getLogout(
           roles: payload.roles,
         },
         accessToken: token,
+      });
+    } catch (err) {
+      return res.status(401).json({ loggedIn: false, message: "Invalid or expired token" });
+    }
+  }
+// Standard API logout (protected with JWT)
+  @UseGuards(JwtAuthGuard)
+  
+  @Post("logout")
+  async logout(
+    @Req() req: any, 
+    @Res({ passthrough: true }) res: Response,
+    @Query('returnUrl') returnUrl?: string
+  ) {
+    try {
+      const token = this.extractTokenFromHeader(req);
+      
+      // Invalidate session and tokens
+      if (token) {
+        await this.sessionService.invalidateSession(token);
+      }
+      
+      // Clear all auth cookies
+      res.clearCookie('Authentication');
+      res.clearCookie('Refresh');
+      res.clearCookie('sso_token');
+      
+      // If returnUrl provided, redirect without tokens
+      if (returnUrl) {
+        // Clean the returnUrl by removing any existing token parameters
+        const cleanUrl = this.removeTokenParams(returnUrl);
+        return res.redirect(cleanUrl);
+      }
+      
+      return { 
+        success: true,
+        message: "Logged out successfully" 
       };
-    } catch {
-      return { loggedIn: false, message: "Invalid or expired token" };
+      
+    } catch (error) {
+      console.error('Logout error:', error);
+      
+      // Still attempt to redirect even if error
+      if (returnUrl) {
+        const cleanUrl = this.removeTokenParams(returnUrl);
+        return res.redirect(cleanUrl);
+      }
+      
+      throw new UnauthorizedException('Logout failed');
     }
   }
 
-  // --- Helper methods for encrypted cookie SSO ---
-  private async createEncryptedSSOSession(user: User, res: Response) {
-    const tokens = await this.authService.generateTokens(user);
-    const encryptedToken = this.encryptToken(tokens.accessToken);
-    const isProd = this.configService.get("NODE_ENV") === "production";
-
-    res.cookie("sso_token", encryptedToken, {
-      httpOnly: true,
-      secure: isProd,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      sameSite: isProd ? "none" : "lax",
-      path: "/",
-      // no domain set for local/dev; set your real domain in prod if needed
+  private removeTokenParams(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    
+    // Remove token-related parameters
+    const paramsToRemove = [
+      'accessToken', 'refreshToken', 'token', 
+      'logout', 'error', 'message'
+    ];
+    
+    paramsToRemove.forEach(param => {
+      urlObj.searchParams.delete(param);
     });
-  }
-
-  private clearEncryptedSSOCookie(res: Response) {
-    // Clear without domain to match how it was set above
-    res.clearCookie("sso_token", { path: "/" });
-  }
-
-  private encryptToken(token: string): string {
-    const crypto = require("crypto");
-    const algorithm = "aes-256-gcm";
-
-    const encryptionKey =
-      this.configService.get("SSO_ENCRYPTION_KEY") || "dev-encryption-key-32-chars-long!";
-    const key = crypto.scryptSync(encryptionKey, "salt", 32);
-    const iv = crypto.randomBytes(16);
-
-    const cipher = crypto.createCipheriv(algorithm, key, iv);
-    let encrypted = cipher.update(token, "utf8", "hex");
-    encrypted += cipher.final("hex");
-
-    const authTag = cipher.getAuthTag();
-    return `${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted}`;
-    }
-
-  private decryptToken(encryptedToken: string): string {
-    const crypto = require("crypto");
-    const algorithm = "aes-256-gcm";
-
-    const [ivHex, authTagHex, encrypted] = encryptedToken.split(":");
-    if (!ivHex || !authTagHex || !encrypted) {
-      throw new UnauthorizedException("Invalid encrypted token format");
-    }
-
-    const encryptionKey =
-      this.configService.get("SSO_ENCRYPTION_KEY") || "dev-encryption-key-32-chars-long!";
-    const key = crypto.scryptSync(encryptionKey, "salt", 32);
-    const iv = Buffer.from(ivHex, "hex");
-    const authTag = Buffer.from(authTagHex, "hex");
-
-    const decipher = crypto.createDecipheriv(algorithm, key, iv);
-    decipher.setAuthTag(authTag);
-
-    let decrypted = decipher.update(encrypted, "hex", "utf8");
-    decrypted += decipher.final("utf8");
-
-    return decrypted;
-  }
-
-  private async getUserFromToken(token: string) {
-    const payload = this.jwtService.verify(token, {
-      secret: this.configService.get("JWT_ACCESS_TOKEN_SECRET"),
-    });
-
-    const user = await this.usersService.getUser({ _id: payload.userId });
-    if (!user) throw new UnauthorizedException("User not found");
-
-    return {
-      userId: user._id.toString(), // <-- string
-      email: user.email,
-    };
-  }
-
-  private extractTokenFromHeader(request: any): string | undefined {
-    const [type, token] = request.headers.authorization?.split(" ") ?? [];
-    return type === "Bearer" ? token : undefined;
+    
+    // Add logout success parameter
+    urlObj.searchParams.set('logout', 'success');
+    
+    return urlObj.toString();
+  } catch (error) {
+    // If URL parsing fails, return original URL without obvious token params
+    return url
+      .replace(/[?&]accessToken=[^&]*/g, '')
+      .replace(/[?&]refreshToken=[^&]*/g, '')
+      .replace(/[?&]token=[^&]*/g, '')
+      + '?logout=success';
   }
 }
+
+  // Optional GET logout (for SSO flows / PHP style)
+  @Get('logout')
+  async logoutGet(@Req() req: Request, @Res() res: Response, @Query('returnUrl') returnUrl?: string) {
+    const userId = (req as any).user?.userId; // if JWT guard not used, may be undefined
+
+    if (userId) {
+      await this.authService.logout(userId, res);
+    } else {
+      res.clearCookie('token');
+      res.clearCookie('Authentication');
+    }
+
+    if (returnUrl) {
+      const safeUrl = await this.authService.validateReturnUrl(returnUrl);
+      if (safeUrl) {
+        return res.redirect(safeUrl);
+      }
+    }
+
+    return res.json({ message: 'Logged out successfully (GET)' });
+  }
+
+
+ private generateLoginFormHTML(redirect?: string, error?: string): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login Single Sign-On</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 400px; margin: 100px auto; padding: 20px; }
+        form { display: flex; flex-direction: column; gap: 15px; }
+        input { padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .error { color: red; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <h1>Login Single Sign-On</h1>
+    ${error === '1' ? '<div class="error">Invalid credentials</div>' : ''}
+    ${error && error !== '1' ? `<div class="error">${error}</div>` : ''}
+    
+    <form method="POST" action="/auth/login">
+        <input type="hidden" name="redirect" value="${redirect || ''}">
+        <input type="text" name="email" placeholder="Email" required>
+        <input type="password" name="password" placeholder="Password" required>
+        <button type="submit">Login</button>
+    </form>
+</body>
+</html>`;
+  }
+
+  private generateLoginSuccessHTML(token: string, redirect?: string): string {
+    return `<!DOCTYPE html>
+<html>
+<head><title>Login Success</title></head>
+<body>
+<script>
+(function () {
+    var fn = 'onLogin';
+    try {
+        if (window.opener && !window.opener.closed) {
+            window.opener.postMessage({ type: fn, token: ${JSON.stringify({token})} }, '*');
+        }
+    } catch (e) {
+        console.warn('Login callback error:', e);
+    }
+    try { window.close(); } catch (_) {}
+})();
+</script>
+</body>
+</html>`;
+  }
+}
+  
+
+
+  // --- Device status ---
+  // @Get("device-status")
+  // async checkDeviceStatus(@Req() req: CustomRequest) {
+  //   const deviceInfo = req.deviceInfo;
+  //   const deviceId = this.sessionService.generateDeviceId(deviceInfo);
+  //   const hasActiveSession = await this.sessionService.hasActiveSession(deviceId);
+
+  //   return {
+  //     deviceId,
+  //     hasActiveSession,
+  //     deviceInfo,
+  //   };
+  // }
+
+ 
+  // --- Helper methods ---
+  // private extractTokenFromHeader(request: Request): string | undefined {
+  //   const authHeader = request.headers.authorization;
+  //   if (!authHeader) return undefined;
+    
+  //   const [type, token] = authHeader.split(" ");
+  //   // Fix the typo: "Bearer" not "Btoken"
+  //   return type === "Bearer" ? token : undefined;
+  // }
+
+  // // private getErrorMessage(errorCode?: string): string {
+  //   switch (errorCode) {
+  //     case '1': return 'Invalid credentials';
+  //     case '2': return 'Session expired';
+  //     case 'missing_credentials': return 'Please fill in all fields';
+  //     case 'invalid_credentials': return 'Invalid email or password';
+  //     case 'login_failed': return 'Login failed. Please try again.';
+  //     default: return errorCode || '';
+  //   }
+  // }
+
+  // private getErrorCode(error: any): string {
+  //   if (error.message?.includes('Invalid credentials')) {
+  //     return '1';
+  //   }
+  //   if (error.message?.includes('expired')) {
+  //     return '2';
+  //   }
+  //   return 'login_failed';
+  // }
