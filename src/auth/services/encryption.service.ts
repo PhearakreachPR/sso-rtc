@@ -5,71 +5,90 @@ import * as crypto from 'crypto';
 
 @Injectable()
 export class EncryptionService {
-  private readonly algorithm = 'aes-256-gcm';
-  private readonly secretKey: string;
-  private readonly key: Buffer;
+  private readonly algorithm = "aes-256-gcm"
+  private readonly secretKey: string
+  private readonly key: Buffer
 
-  constructor(private configService: ConfigService) {
-    this.secretKey = this.configService.getOrThrow('SSO_ENCRYPTION_KEY');
+  constructor() {
+    this.secretKey = "your-super-secret-key-32-chars-long"
     // Create a proper key from the secret
-    this.key = crypto.createHash('sha256').update(this.secretKey).digest();
+    this.key = crypto.scryptSync(this.secretKey, "salt", 32)
   }
 
-  encrypt(text: string): { encrypted: string; iv: string; tag: string } {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv(this.algorithm, this.key, iv);
-    cipher.setAAD(Buffer.from('sso-auth', 'utf8'));
-    
-    let encrypted = cipher.update(text, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    
-    const tag = cipher.getAuthTag();
-    
-    return {
-      encrypted,
-      iv: iv.toString('hex'),
-      tag: tag.toString('hex')
-    };
-  }
-
-  decrypt(encryptedData: { encrypted: string; iv: string; tag: string }): string {
+  // Encrypt any string (for JWT tokens)
+  encryptString(text: string): string {
     try {
-      const iv = Buffer.from(encryptedData.iv, 'hex');
-      const tag = Buffer.from(encryptedData.tag, 'hex');
-      
-      const decipher = crypto.createDecipheriv(this.algorithm, this.key, iv);
-      decipher.setAAD(Buffer.from('sso-auth', 'utf8'));
-      decipher.setAuthTag(tag);
-      
-      let decrypted = decipher.update(encryptedData.encrypted, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      
-      return decrypted;
+      const iv = crypto.randomBytes(16)
+      const cipher = crypto.createCipheriv(this.algorithm, this.key, iv)
+
+      let encrypted = cipher.update(text, "utf8", "hex")
+      encrypted += cipher.final("hex")
+
+      const tag = cipher.getAuthTag()
+
+      // Combine all parts into a single string
+      return `${encrypted}.${iv.toString("hex")}.${tag.toString("hex")}`
     } catch (error) {
-      throw new Error('Failed to decrypt SSO token');
+      console.error("Encryption failed:", error)
+      throw new Error("Failed to encrypt token")
     }
   }
 
-  encryptToken(payload: any): string {
-    const jsonString = JSON.stringify(payload);
-    const encrypted = this.encrypt(jsonString);
-    
-    // Combine all parts into a single string
-    return `${encrypted.encrypted}.${encrypted.iv}.${encrypted.tag}`;
-  }
-
-  decryptToken(encryptedToken: string): any {
+  // Decrypt any string (for JWT tokens)
+  decryptString(encryptedToken: string): string {
     try {
-      const [encrypted, iv, tag] = encryptedToken.split('.');
-      
-      if (!encrypted || !iv || !tag) {
-        throw new Error('Invalid token format');
+      // Handle both encrypted and plain tokens for backward compatibility
+      if (!encryptedToken.includes(".")) {
+        console.log("Plain token detected, returning as-is")
+        return encryptedToken
       }
 
-      const decrypted = this.decrypt({ encrypted, iv, tag });
-      return JSON.parse(decrypted);
+      const parts = encryptedToken.split(".")
+      if (parts.length !== 3) {
+        console.log("Invalid token format, treating as plain token")
+        return encryptedToken
+      }
+
+      const [encrypted, ivHex, tagHex] = parts
+
+      if (!encrypted || !ivHex || !tagHex) {
+        throw new Error("Invalid token format: missing parts")
+      }
+
+      const iv = Buffer.from(ivHex, "hex")
+      const tag = Buffer.from(tagHex, "hex")
+
+      const decipher = crypto.createDecipheriv(this.algorithm, this.key, iv)
+      decipher.setAuthTag(tag)
+
+      let decrypted = decipher.update(encrypted, "hex", "utf8")
+      decrypted += decipher.final("utf8")
+
+      return decrypted
     } catch (error) {
-      throw new Error('Invalid or expired SSO token');
+      console.error("Decryption failed:", error.message)
+      // Return original token if decryption fails (for plain tokens)
+      return encryptedToken
+    }
+  }
+
+  // Encrypt objects (for complex payloads)
+  encryptObject(payload: any): string {
+    const jsonString = JSON.stringify(payload)
+    return this.encryptString(jsonString)
+  }
+
+  // Decrypt objects (for complex payloads)
+  decryptObject(encryptedToken: string): any {
+    try {
+      const decryptedString = this.decryptString(encryptedToken)
+      return JSON.parse(decryptedString)
+    } catch (error) {
+      console.error("Object decryption failed:", error.message)
+      throw new Error("Failed to decrypt SSO object: " + error.message)
     }
   }
 }
+
+// Create singleton instance
+export const encryptionService = new EncryptionService()

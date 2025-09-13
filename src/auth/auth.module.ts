@@ -15,6 +15,7 @@ import { DeviceTrackingMiddleware } from './middleware/device-tracking.middlewar
 import { EncryptionService } from './services/encryption.service';
 import { SSOService } from './services/sso.service';
 
+
 @Module({
   imports: [
     UsersModule,
@@ -32,7 +33,7 @@ import { SSOService } from './services/sso.service';
       inject: [ConfigService],
     }),
   ],
-  controllers: [AuthController],
+  controllers: [AuthController ],
   providers: [
     AuthService,
     LocalStrategy,
@@ -46,10 +47,18 @@ import { SSOService } from './services/sso.service';
     AuthService, 
     SessionService,
     SSOService, // Also export SSOService if other modules need it
-    JwtModule, // Export JwtModule if needed
+    JwtModule, 
+    EncryptionService,// Export JwtModule if needed
   ],
 })
 export class AuthModule implements NestModule {
+   constructor(private configService: ConfigService) {
+    console.log('JWT Access Secret:', this.configService.get('JWT_ACCESS_TOKEN_SECRET'));
+    console.log('JWT Access Expiry:', this.configService.get('JWT_ACCESS_TOKEN_EXPIRATION_MS'));
+    console.log('JWT Refresh Secret:', this.configService.get('JWT_REFRESH_TOKEN_SECRET'));
+  }
+  
+  configure(consumer: MiddlewareConsumer)
   configure(consumer: MiddlewareConsumer) {
     consumer
       .apply(DeviceTrackingMiddleware)

@@ -1,4 +1,4 @@
-// src/auth/auth.service.ts - Enhanced with encrypted SSO
+// src/auth/auth.service.ts - Simplified without encryption
 import { Injectable, UnauthorizedException, ConflictException, BadRequestException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
@@ -7,10 +7,10 @@ import { Response } from "express";
 import { Types } from "mongoose";
 import { User } from "../users/schema/user.schema";
 import { UsersService } from "../users/users.service";
-import { TokenPayload } from "./token-payload.interface";
 import { DeviceInfo } from "src/interfaces/device-info.interface";
 import { SessionService } from "./services/session.service";
 import { createUserRequest } from "src/users/dto/create-user.request";
+import { TokenPayload } from "src/interfaces/token-payload";
 
 interface RegisterDto {
   email: string;
@@ -32,11 +32,9 @@ export class AuthService {
   // ----------------- REGISTER -----------------
   async register(createUserDto: createUserRequest): Promise<any> {
     try {
-      // Use the existing create method which already handles validation and hashing
       const newUser = await this.usersService.create(createUserDto);
       return newUser;
     } catch (error) {
-      // Re-throw known errors or wrap unknown errors
       if (error instanceof ConflictException) {
         throw error;
       }
@@ -48,12 +46,10 @@ export class AuthService {
   async registerWithConfirmation(registerDto: RegisterDto): Promise<any> {
     const { email, password, confirmPassword, firstName, lastName } = registerDto;
 
-    // Validate password confirmation
     if (password !== confirmPassword) {
       throw new BadRequestException("Passwords do not match");
     }
 
-    // Create user request object
     const createUserDto: createUserRequest = {
       email,
       password,
@@ -64,7 +60,7 @@ export class AuthService {
     return this.register(createUserDto);
   }
 
-  // ----------------- LOGIN -----------------
+  // ----------------- LOGIN (like PHP setcookie) -----------------
   async login(user: any, response: Response, deviceInfo?: DeviceInfo) {
     try {
       const expiresAccessToken = new Date(Date.now() + parseInt(this.configService.getOrThrow("JWT_ACCESS_TOKEN_EXPIRATION_MS")));
@@ -89,23 +85,25 @@ export class AuthService {
       );
 
       // Set cookies
-      const isProd = this.configService.get("NODE_ENV") === "production";
-      response.cookie("Authentication", accessToken, {
-        httpOnly: true,
-        secure: isProd,
-        sameSite: "strict",
-        expires: expiresAccessToken,
-      });
-      response.cookie("Refresh", refreshToken, {
-        httpOnly: true,
-        secure: isProd,
-        sameSite: "strict",
-        path: "/auth/refresh",
-        expires: expiresRefreshToken,
-      });
+    const isProd = this.configService.get("NODE_ENV") === "production";
 
+    response.cookie("Authentication", accessToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: "none",  // important for cross-site
+      path: "/",
+      expires: expiresAccessToken,
+    });
+
+    response.cookie("Refresh", refreshToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: "none",  // important
+      path: "/auth/refresh",
+      expires: expiresRefreshToken,
+    });
       // Set encrypted SSO cookie for cross-site access
-      this.setEncryptedSSOCookie(response, accessToken);
+
 
       // Log device access if provided
       if (deviceInfo) {
@@ -125,7 +123,6 @@ export class AuthService {
       throw new UnauthorizedException("Login failed: " + error.message);
     }
   }
-
   // ----------------- TOKEN LOGIN -----------------
   async loginWithToken(token: string, type: "access" | "refresh", response: Response) {
     try {
@@ -145,7 +142,6 @@ export class AuthService {
         throw new UnauthorizedException("User not found");
       }
 
-      // For refresh tokens, verify the stored hash
       if (type === "refresh") {
         const userObj = this.toPlainObject(user);
         if (!userObj.refreshToken || !(await compare(token, userObj.refreshToken))) {
@@ -153,7 +149,6 @@ export class AuthService {
         }
       }
 
-      // Generate new tokens and login
       return await this.login(user, response);
     } catch (error) {
       throw new UnauthorizedException("Invalid or expired token: " + error.message);
@@ -166,11 +161,6 @@ export class AuthService {
       const dbUser = await this.usersService.findOneById(user._id.toString());
       if (!dbUser) {
         throw new UnauthorizedException("User not found");
-      }
-
-      const userObj = this.toPlainObject(dbUser);
-      if (!userObj.refreshToken) {
-        throw new UnauthorizedException("Refresh token not found");
       }
 
       return await this.login(dbUser, response);
@@ -205,31 +195,27 @@ export class AuthService {
       throw new UnauthorizedException("Authentication failed");
     }
   }
-
-  // Verify refresh token
-  async verifyRefreshToken(refreshToken: string, userId: string): Promise<any> {
-    try {
-      const user = await this.usersService.findOneById(userId);
-      if (!user) {
-        throw new UnauthorizedException("User not found");
-      }
-
-      const userObj = this.toPlainObject(user);
-      if (!userObj.refreshToken) {
-        throw new UnauthorizedException("Refresh token not found");
-      }
-
-      const isTokenValid = await compare(refreshToken, userObj.refreshToken);
-      if (!isTokenValid) {
-        throw new UnauthorizedException("Invalid refresh token");
-      }
-
-      return user;
-    } catch (error) {
-      throw new UnauthorizedException("Refresh token verification failed");
-    }
+async verifyRefreshToken(refreshToken: string, userId: string) {
+  const user = await this.usersService.findOneById(userId);
+  if (!user) {
+    throw new Error("User not found");
   }
 
+  const userObj = this.toPlainObject(user);
+
+  // Check if user has a valid refresh token
+  if (!userObj.refreshToken) {
+    throw new Error("No refresh token found for user");
+  }
+
+  // Compare the provided token with the stored hashed token
+  const isValid = await compare(refreshToken, userObj.refreshToken);
+  if (!isValid) {
+    throw new Error("Invalid refresh token");
+  }
+
+  return userObj;
+}
   // Validate user for Passport local strategy
   async validateUser(email: string, password: string): Promise<any> {
     try {
@@ -254,7 +240,6 @@ export class AuthService {
     } else if (typeof user.toJSON === 'function') {
       return user.toJSON();
     } else {
-      // Fallback for plain objects
       return JSON.parse(JSON.stringify(user));
     }
   }
@@ -275,7 +260,7 @@ export class AuthService {
     }
   }
 
-  // ----------------- TOKEN / SSO SUPPORT -----------------
+  // ----------------- TOKEN SUPPORT -----------------
   async generateTokens(user: any) {
     try {
       const payload: TokenPayload = { userId: user._id.toString() };
@@ -294,10 +279,6 @@ export class AuthService {
     } catch (error) {
       throw new Error("Failed to generate tokens: " + error.message);
     }
-  }
-
-  getAccessTokenExpiration(): string {
-    return this.configService.getOrThrow("JWT_ACCESS_TOKEN_EXPIRATION_MS");
   }
 
   async getUserFromToken(token: string): Promise<any> {
@@ -333,8 +314,6 @@ export class AuthService {
   }) {
     try {
       console.log(`Device access logged for user ${userId}:`, deviceInfo);
-      // You can implement actual logging to database here
-      // Example: await this.deviceAccessModel.create({ userId, ...deviceInfo });
     } catch (error) {
       console.error("Failed to log device access:", error);
     }
@@ -359,164 +338,41 @@ export class AuthService {
   }
 
   private async getAllowedReturnWebsites(): Promise<Array<{ domain: string }>> {
-    // You can make this dynamic by fetching from database
     return [
       { domain: "localhost" }, 
       { domain: "localhost:3000" }, 
-      { domain: "localhost:3001" }, 
-      { domain: "localhost:3002" }, 
+      { domain: "localhost:5000" },    // Site 1
+      { domain: "localhost:60000" },   // Site 2
       { domain: "127.0.0.1" },
-      { domain: "127.0.0.1:3001" },
-      { domain: "127.0.0.1:3002" },
-      { domain: "127.0.0.1:5500" },
-      { domain: "127.0.0.1:5501" },
-      {domain:  "localhost:5000"},
-      {domain:  "localhost:60000"}
+      { domain: "127.0.0.1:5000" },
+      { domain: "127.0.0.1:60000" },
     ];
   }
 
-  async getAllowedDomains(): Promise<string[]> {
-    const sites = await this.getAllowedReturnWebsites();
-    return sites.map(s => s.domain);
-  }
-
-  // Token verification
+  // Simple token verification (no encryption)
   async verifyAccessToken(token: string): Promise<boolean> {
     try {
       const payload = this.jwtService.verify(token, { 
         secret: this.configService.getOrThrow("JWT_ACCESS_TOKEN_SECRET") 
       });
-      const user = await this.usersService.findOneById(payload.userId);
-      if (!user) return false;
+      
+      const user = await this.usersService.findOneById(payload.userId); 
+      if (!user) {
+        return false;
+      }
       
       const userObj = this.toPlainObject(user);
-      return !!(user && userObj.isActive !== false);
+      const isActive = userObj.isActive !== false;
+      
+      return !!(user && isActive);
     } catch (error) {
       return false;
     }
   }
 
-  // General token verification
-  async verify(token: string) {
+  // Check if user has valid SSO session (simple token check)
+  async checkSSOSession(token: string): Promise<any> {
     try {
-      const decoded = this.jwtService.verify(token, {
-        secret: this.configService.getOrThrow("JWT_ACCESS_TOKEN_SECRET")
-      });
-      
-      const user = await this.usersService.findOneById(decoded.userId);
-      if (!user) {
-        throw new UnauthorizedException("User not found");
-      }
-
-      const userObj = this.toPlainObject(user);
-      const { password, refreshToken, ...safeUser } = userObj;
-      return { valid: true, user: safeUser };
-    } catch (error) {
-      throw new UnauthorizedException("Invalid or expired token: " + error.message);
-    }
-  }
-
-  // ----------------- ENCRYPTED SSO METHODS -----------------
-
-  /**
-   * Set encrypted SSO cookie for cross-site authentication
-   */
-  setEncryptedSSOCookie(response: Response, token: string): void {
-    try {
-      const encryptedToken = this.encryptToken(token);
-      const isProd = this.configService.get('NODE_ENV') === 'production';
-      const cookieDomain = this.configService.get('COOKIE_DOMAIN') || (isProd ? '.example.com' : undefined);
-      
-      response.cookie('sso_token', encryptedToken, {
-        httpOnly: true,
-        secure: isProd,
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-        sameSite: isProd ? 'none' : 'lax',
-        path: '/',
-        domain: cookieDomain
-      });
-    } catch (error) {
-      console.error('Failed to set encrypted SSO cookie:', error);
-    }
-  }
-
-  /**
-   * Clear encrypted SSO cookie
-   */
-  clearEncryptedSSOCookie(response: Response): void {
-    try {
-      const isProd = this.configService.get('NODE_ENV') === 'production';
-      const cookieDomain = this.configService.get('COOKIE_DOMAIN') || (isProd ? '.example.com' : undefined);
-      
-      response.clearCookie('sso_token', {
-        path: '/',
-        domain: cookieDomain
-      });
-    } catch (error) {
-      console.error('Failed to clear encrypted SSO cookie:', error);
-    }
-  }
-
-  /**
-   * Encrypt token for secure storage in cookies
-   */
-  encryptToken(token: string): string {
-    try {
-      const crypto = require('crypto');
-      const algorithm = 'aes-256-gcm';
-      
-      const encryptionKey = this.configService.get('SSO_ENCRYPTION_KEY') || 'dev-encryption-key-32-chars-long!';
-      const key = crypto.scryptSync(encryptionKey, 'salt', 32);
-      const iv = crypto.randomBytes(16);
-      
-      const cipher = crypto.createCipheriv(algorithm, key, iv);
-      let encrypted = cipher.update(token, 'utf8', 'hex');
-      encrypted += cipher.final('hex');
-      
-      const authTag = cipher.getAuthTag();
-      return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
-    } catch (error) {
-      throw new Error('Token encryption failed: ' + error.message);
-    }
-  }
-
-  /**
-   * Decrypt token from secure cookie
-   */
-  decryptToken(encryptedToken: string): string {
-    try {
-      const crypto = require('crypto');
-      const algorithm = 'aes-256-gcm';
-      
-      const [ivHex, authTagHex, encrypted] = encryptedToken.split(':');
-      
-      if (!ivHex || !authTagHex || !encrypted) {
-        throw new Error('Invalid encrypted token format');
-      }
-      
-      const encryptionKey = this.configService.get('SSO_ENCRYPTION_KEY') || 'dev-encryption-key-32-chars-long!';
-      const key = crypto.scryptSync(encryptionKey, 'salt', 32);
-      const iv = Buffer.from(ivHex, 'hex');
-      const authTag = Buffer.from(authTagHex, 'hex');
-      
-      const decipher = crypto.createDecipheriv(algorithm, key, iv);
-      decipher.setAuthTag(authTag);
-      
-      let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      
-      return decrypted;
-    } catch (error) {
-      throw new UnauthorizedException('Token decryption failed: ' + error.message);
-    }
-  }
-
-  /**
-   * Check if user has valid encrypted SSO session
-   */
-  async checkEncryptedSSOSession(encryptedToken: string): Promise<any> {
-    try {
-      const token = this.decryptToken(encryptedToken);
       const isValid = await this.verifyAccessToken(token);
       
       if (isValid) {
@@ -534,48 +390,25 @@ export class AuthService {
     }
   }
 
-  // ----------------- LOGOUT -----------------
+  // ----------------- LOGOUT (like PHP setcookie with past expiration) -----------------
   async logout(userId: string, response?: Response): Promise<void> {
     try {
-      // Clear refresh token from database
-      await this.usersService.updateUser(
-        { _id: new Types.ObjectId(userId) },
-        { $unset: { refreshToken: 1 } }
-      );
+        // Clear refresh token in DB
+        await this.usersService.updateUser(
+            { _id: new Types.ObjectId(userId) },
+            { $unset: { refreshToken: 1 } }
+        );
 
-      // Clear encrypted SSO cookie if response provided
-      if (response) {
-        this.clearEncryptedSSOCookie(response);
-      }
+        if (response) {
+            response.clearCookie('Authentication', { path: '/' });
+            response.clearCookie('Refresh', { path: '/' });
+        }
     } catch (error) {
-      console.error("Logout error:", error);
+        console.error("Logout error:", error);
     }
-  }
+}
 
-  // Logout from all devices
-  async logoutAll(userId: string, response?: Response): Promise<void> {
-    try {
-      // Clear refresh token and invalidate all sessions
-      await this.usersService.updateUser(
-        { _id: new Types.ObjectId(userId) },
-        { $unset: { refreshToken: 1 } }
-      );
-      
-      // Invalidate all user sessions if session service supports it
-      if (this.sessionService.invalidateAllUserSessions) {
-        await this.sessionService.invalidateAllUserSessions(userId);
-      }
-
-      // Clear encrypted SSO cookie if response provided
-      if (response) {
-        this.clearEncryptedSSOCookie(response);
-      }
-    } catch (error) {
-      console.error("Logout all error:", error);
-    }
-  }
-
-  // ----------------- PASSWORD MANAGEMENT -----------------
+  // Password management
   async changePassword(userId: string, oldPassword: string, newPassword: string): Promise<void> {
     try {
       const user = await this.usersService.findOneById(userId);
@@ -594,7 +427,7 @@ export class AuthService {
         { _id: new Types.ObjectId(userId) },
         { 
           $set: { password: hashedNewPassword },
-          $unset: { refreshToken: 1 } // Logout from all devices
+          $unset: { refreshToken: 1 }
         }
       );
     } catch (error) {
@@ -602,28 +435,6 @@ export class AuthService {
         throw error;
       }
       throw new BadRequestException("Failed to change password: " + error.message);
-    }
-  }
-
-  // Reset password (you'd typically send this via email)
-  async resetPassword(email: string, newPassword: string): Promise<void> {
-    try {
-      const user = await this.usersService.findByEmail(email.toLowerCase().trim());
-      if (!user) {
-        // Don't reveal if user exists or not
-        return;
-      }
-
-      const hashedNewPassword = await hash(newPassword, 12);
-      await this.usersService.updateUser(
-        { _id: user._id },
-        { 
-          $set: { password: hashedNewPassword },
-          $unset: { refreshToken: 1 } // Logout from all devices
-        }
-      );
-    } catch (error) {
-      console.error("Password reset error:", error);
     }
   }
 }
