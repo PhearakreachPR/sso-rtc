@@ -72,7 +72,7 @@ export class AuthController {
         message: "User registered successfully",
         user: result.user,
         accessToken: result.accessToken,
-        // refreshToken: result.refreshToken
+        refreshToken: result.refreshToken
       });
     } catch (error) {
       return res.status(400).json({
@@ -170,12 +170,10 @@ async ssoCheck(
       
       if (returnUrl) {
         // SSO redirect with tokens
-        const redirectUrl = `${returnUrl}?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}`;
+        const redirectUrl = `${returnUrl}?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&user_id=${result.user._id}`;
         return res.redirect(redirectUrl);
-      } else {
-        // No returnUrl, redirect to success page or dashboard
-        return res.redirect('/dashboard?message=Login successful');
-      }
+      } 
+      return res.json(result);
     } catch (error) {
       // Redirect back to login with error
       const errorUrl = `/auth/login${returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : ''}`;
@@ -617,7 +615,7 @@ inspectToken(@Query('token') token: string, @Req() req: Request) {
     last50Chars: token.substring(token.length - 50)
   };
 }
-@Get("generate-test-token")
+@Get("  generate-test-token")
 generateTestToken() {
   const payload = { 
     userId: '68b931b5321c0629a7881546', 
@@ -745,9 +743,9 @@ generateTestToken() {
       return res.status(401).json({ loggedIn: false, message: "Invalid or expired token" });
     }
   }
+
 // Standard API logout (protected with JWT)
   @UseGuards(JwtAuthGuard)
-  
   @Post("logout")
   async logout(
     @Req() req: any, 
@@ -842,75 +840,119 @@ generateTestToken() {
     return res.json({ message: 'Logged out successfully (GET)' });
   }
 
+// Add these two methods to your AuthController class
+// Place them anywhere within the @Controller("auth") class, preferably near your other GET endpoints
 
- private generateLoginFormHTML(redirect?: string, error?: string): string {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login Single Sign-On</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 400px; margin: 100px auto; padding: 20px; }
-        form { display: flex; flex-direction: column; gap: 15px; }
-        input { padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
-        button { padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        .error { color: red; margin-bottom: 15px; }
-    </style>
-</head>
-<body>
-    <h1>Login Single Sign-On</h1>
-    ${error === '1' ? '<div class="error">Invalid credentials</div>' : ''}
-    ${error && error !== '1' ? `<div class="error">${error}</div>` : ''}
+// 1. Check current user session (for auto-login detection)
+@Get("me")
+async getCurrentUser(@Req() req: Request, @Res() res: Response) {
+  console.log('🔍 Checking current user session...');
+  console.log('Cookies:', req.cookies);
+  
+  try {
+    // Check for authentication token in cookies
+    const token = req.cookies?.Authentication || req.cookies?.sso_token;
     
-    <form method="POST" action="/auth/login">
-        <input type="hidden" name="redirect" value="${redirect || ''}">
-        <input type="text" name="email" placeholder="Email" required>
-        <input type="password" name="password" placeholder="Password" required>
-        <button type="submit">Login</button>
-    </form>
-</body>
-</html>`;
-  }
-
-  private generateLoginSuccessHTML(token: string, redirect?: string): string {
-    return `<!DOCTYPE html>
-<html>
-<head><title>Login Success</title></head>
-<body>
-<script>
-(function () {
-    var fn = 'onLogin';
-    try {
-        if (window.opener && !window.opener.closed) {
-            window.opener.postMessage({ type: fn, token: ${JSON.stringify({token})} }, '*');
-        }
-    } catch (e) {
-        console.warn('Login callback error:', e);
+    if (!token) {
+      console.log('❌ No auth token found in cookies');
+      return res.status(401).json({ authenticated: false });
     }
-    try { window.close(); } catch (_) {}
-})();
-</script>
-</body>
-</html>`;
+    
+    // Verify the token
+    const payload = this.jwtService.verify(token, {
+      secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+    });
+    
+    console.log('✅ Token verified, payload:', payload);
+    
+    // Get user details
+    const user = await this.usersService.findOneById(payload.userId);
+    
+    if (!user) {
+      console.log('❌ User not found for ID:', payload.userId);
+      return res.status(401).json({ authenticated: false });
+    }
+    
+    console.log('✅ User found:', user.email);
+    
+    return res.json({
+      authenticated: true,
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName
+      },
+      id: user._id.toString() // PHP code expects this at root level too
+    });
+    
+  } catch (error) {
+    console.log('❌ Session check failed:', error.message);
+    return res.status(401).json({ authenticated: false });
   }
 }
+
+// 2. Get fresh tokens for authenticated user
+@Get("token")
+async getFreshTokens(@Req() req: Request, @Res() res: Response) {
+  console.log('🔄 Fresh token request...');
   
-
-
-  // --- Device status ---
+  try {
+    // Check for existing authentication
+    const token = req.cookies?.Authentication || req.cookies?.sso_token;
+    
+    if (!token) {
+      console.log('❌ No auth token for fresh token generation');
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    // Verify current token
+    const payload = this.jwtService.verify(token, {
+      secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+    });
+    
+    // Get user
+    const user = await this.usersService.findOneById(payload.userId);
+    
+    if (!user) {
+      console.log('❌ User not found for fresh tokens');
+      return res.status(401).json({ error: 'User not found' });
+    }
+    
+    // Generate fresh tokens using your existing method
+    const tokens = await this.authService.generateTokens(user);
+    
+    console.log('✅ Fresh tokens generated for user:', user.email);
+    
+    return res.json({
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user_id: user._id.toString(),
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName
+      }
+    });
+    
+  } catch (error) {
+    console.log('❌ Fresh token generation failed:', error.message);
+    return res.status(401).json({ error: 'Failed to generate fresh tokens' });
+  }
+}
   // @Get("device-status")
   // async checkDeviceStatus(@Req() req: CustomRequest) {
   //   const deviceInfo = req.deviceInfo;
-  //   const deviceId = this.sessionService.generateDeviceId(deviceInfo);
-  //   const hasActiveSession = await this.sessionService.hasActiveSession(deviceId);
+  //  const deviceId = this.sessionService.generateDeviceId(deviceInfo);
+  // const hasActiveSession = await this.sessionService.hasActiveSession(deviceId);
 
-  //   return {
-  //     deviceId,
+  // return {
+  //      deviceId,
   //     hasActiveSession,
   //     deviceInfo,
   //   };
-  // }
+  //  }
 
  
   // --- Helper methods ---
@@ -942,4 +984,5 @@ generateTestToken() {
   //     return '2';
   //   }
   //   return 'login_failed';
-  // }
+  // 
+}
