@@ -34,6 +34,9 @@ export class LoginDto {
   returnUrl?: string;
 }
 
+export class RegisterDto extends createUserRequest {
+}
+
 class TokenLoginDto {
   token: string;
   type: "access" | "refresh";
@@ -46,7 +49,6 @@ interface CustomRequest extends Request {
 
 @Controller("auth")
 export class AuthController {
-  [x: string]: any;
   constructor(
     private readonly authService: AuthService,
     private readonly jwtService: JwtService,
@@ -55,14 +57,29 @@ export class AuthController {
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
   ) {}
-  // --- Register user ---
+
+  // --- Enhanced Register with Role Support ---
   @Post("register")
   async register(
-    @Body() registerDto: createUserRequest,
+    @Body() registerDto: RegisterDto,
     @Res() res: Response,
     @Req() req: Request
   ) {
     try {
+      // Validate role
+      const validRoles = ['Admin', 'Teacher', 'Head_Department', 'Student'];
+      if (registerDto.role && !validRoles.includes(registerDto.role)) {
+        return res.status(400).json({
+          message: "Invalid role specified",
+          validRoles: validRoles
+        });
+      }
+
+      // Default to Student if no role specified
+      if (!registerDto.role) {
+        registerDto.role = 'Student';
+      }
+
       const user = await this.authService.register(registerDto);
       
       // Auto-login after successful registration
@@ -71,6 +88,9 @@ export class AuthController {
       return res.json({
         message: "User registered successfully",
         user: result.user,
+        role: registerDto.role,
+        roles: [registerDto.role], // For compatibility with Vue frontend
+        token: result.accessToken,
         accessToken: result.accessToken,
         refreshToken: result.refreshToken
       });
@@ -81,173 +101,648 @@ export class AuthController {
       });
     }
   }
+@Post('register2')
+  async createUserWithRole(
+    @Body() request: createUserRequest,
+    @Res() res: Response
+  ) {
+    try {
+      // Validate role
+      const validRoles = ['Admin', 'Teacher', 'Head_Department', 'Student'];
+      if (request.role && !validRoles.includes(request.role)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid role specified",
+          validRoles: validRoles
+        });
+      }
 
-  // --- Enhanced SSO Check (like PHP session/cookie check) ---
-// --- Enhanced SSO Check with optional auto-login ---
-@Get("sso-check")
-async ssoCheck(
-  @Req() req: CustomRequest,
-  @Res() res: Response,
-  @Query("returnUrl") returnUrl?: string,
-  @Query("autoLogin") autoLogin?: string,
-) {
-  try {
-    // Only proceed if autoLogin is explicitly true
-    if (autoLogin !== 'true') {
-      return res.json({
-        success: false,
-        authenticated: false,
-        message: "Auto-login not enabled"
-      });
-    }
+      // Default to Student if no role specified
+      if (!request.role) {
+        request.role = 'Student';
+      }
 
-    const token = req.cookies?.sso_token;
-    if (!token) {
-      return res.json({
-        success: false,
-        authenticated: false,
-        message: "No SSO token found"
-      });
-    }
+      const newUser = await this.usersService.create(request);
 
-    // Validate token
-    const isValid = await this.authService.verifyAccessToken(token);
-    if (!isValid) {
-      return res.json({
-        success: false,
-        authenticated: false,
-        message: "Invalid token"
-      });
-    }
-
-    const userInfo = await this.authService.getUserFromToken(token);
-    
-    if (returnUrl) {
-      const redirectUrl = `${returnUrl}?token=${token}&autoLogin=true`;
       return res.json({
         success: true,
-        authenticated: true,
-        user: userInfo,
-        redirectUrl: redirectUrl,
-        message: "Auto-login successful"
+        message: "User created successfully",
+        user: {
+          id: newUser._id,
+          email: newUser.email,
+          firstName: newUser.firstName,
+          lastName: newUser.lastName,
+          role: newUser.role,
+          department: newUser.department,
+          subject: newUser.subject
+        }
+      });
+    } catch (error) {
+      return res.status(error.status || 400).json({
+        success: false,
+        message: error.message || "Failed to create user"
       });
     }
+  }
 
+  // --- Enhanced Login with Role Information ---
+  // --- Enhanced Login with Role Information ---
+@Post('login')
+@UseGuards(LocalAuthGuard)
+async login(
+  @CurrentUser() user: any,
+  @Body('returnUrl') returnUrl: string,
+  @Res({ passthrough: false }) res: Response,
+) {
+  try {
+    console.log(' SSO Login POST received - START');
+    console.log(' User object:', JSON.stringify(user, null, 2));
+    console.log(' Return URL:', returnUrl);
+    
+    if (!user) {
+      console.error(' No user object from LocalAuthGuard');
+      throw new UnauthorizedException('No user found');
+    }
+
+    if (!user._id) {
+      console.error(' User object missing _id:', user);
+      throw new UnauthorizedException('Invalid user data');
+    }
+
+    console.log('Calling authService.login...');
+    const result = await this.authService.login(user, res);
+    console.log(' authService.login completed');
+    
+    // Get user role
+    console.log(' Getting user role...');
+    const userDoc = await this.usersService.findOneById(user._id);
+    
+    if (!userDoc) {
+      console.error('❌ User not found in database for ID:', user._id);
+      throw new UnauthorizedException('User not found in database');
+    }
+    
+    const userRole = userDoc?.role || 'Student';
+    console.log(' User role:', userRole);
+
+    if (returnUrl) {
+      console.log(' Processing returnUrl redirect...');
+      // Redirect back to RTC with tokens
+      const redirectUrl = new URL(returnUrl);
+      redirectUrl.searchParams.set('token', result.accessToken);
+      redirectUrl.searchParams.set('accessToken', result.accessToken);
+      redirectUrl.searchParams.set('refreshToken', result.refreshToken);
+      
+      console.log(' Redirecting to:', redirectUrl.toString());
+      return res.redirect(redirectUrl.toString());
+    } 
+    
+    // JSON response if no returnUrl
+    console.log(' Sending JSON response (no returnUrl)');
     return res.json({
+      message: "Login successful",
       success: true,
-      authenticated: true,
-      user: userInfo
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+        role: userRole,
+      },
+      roles: [userRole],
+      role: userRole,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken
     });
-
+    
   } catch (error) {
-    return res.json({
-      success: false,
-      authenticated: false,
-      message: "SSO check failed"
-    });
+    console.error('❌ Login failed - FULL ERROR:');
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('Error details:', error);
+    
+    // Redirect back with error
+    if (returnUrl) {
+      console.log(' Redirecting back with error...');
+      const errorUrl = new URL(returnUrl);
+      errorUrl.searchParams.set('error', 'Login failed: ' + error.message);
+      return res.redirect(errorUrl.toString());
+    }
+    
+    throw new UnauthorizedException('Login failed: ' + error.message);
   }
 }
 
-
-  // --- Login page ---
-  // GET route to show login page
+  // --- Get Login Page ---
+ // In your auth.controller.ts - Check this method
   @Get('login')
   @Render('login')
   showLoginPage(@Query('returnUrl') returnUrl?: string, @Query('error') error?: string) {
-    return { returnUrl, error };
-  }
-
-  // POST route for login - returns JSON or redirects based on returnUrl
-  @Post('login')
-  @UseGuards(LocalAuthGuard)
-  async login(
-    @CurrentUser() user: any,
-    @Body('returnUrl') returnUrl: string,
-    @Res({ passthrough: false }) res: Response,
-  ) {
-    try {
-      const result = await this.authService.login(user, res);
-      
-      if (returnUrl) {
-        // SSO redirect with tokens
-        const redirectUrl = `${returnUrl}?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&user_id=${result.user._id}`;
-        return res.redirect(redirectUrl);
-      } 
-      return res.json(result);
-    } catch (error) {
-      // Redirect back to login with error
-      const errorUrl = `/auth/login${returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : ''}`;
-      return res.redirect(`${errorUrl}&error=${encodeURIComponent('Login failed')}`);
-    }
-  }
-
-@Get("user-info")
-async getUserInfo(@Query('token') token: string) {
-  try {
-    const payload = this.jwtService.verify(token, {
-      secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
-    });
+    console.log('🎨 Rendering login page with:', { returnUrl, error });
     
-    const user = await this.usersService.findOneById(payload.userId);
+    return { 
+      returnUrl: returnUrl || '',
+      error: error || ''
+    };
+  }
+  // --- Enhanced User Info with Role ---
+ @Get("user-info")
+async getUserInfo(@Query('token') token?: string, @Query('user_id') userId?: string) {
+  try {
+    console.log('🔍 User-info request:', { token: token ? 'provided' : 'none', userId });
+    
+    let actualUserId = userId;
+    
+    // If token is provided, extract userId from it
+    if (token && !userId) {
+      try {
+        const payload = this.jwtService.verify(token, {
+          secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+        });
+        actualUserId = payload.userId;
+        console.log('✅ Extracted userId from token:', actualUserId);
+      } catch (err) {
+        console.error('❌ Failed to verify token:', err.message);
+        return { error: "Invalid token" };
+      }
+    }
+    
+    if (!actualUserId) {
+      console.error('❌ No user_id or token provided');
+      return { error: "user_id or token is required" };
+    }
+    
+    const user = await this.usersService.findOneById(actualUserId);
     if (!user) {
+      console.error('❌ User not found for ID:', actualUserId);
       return { error: "User not found" };
     }
+    
+    const userRole = user.role || 'Student';
+    console.log('✅ User found:', user.email, 'Role:', userRole);
     
     return {
       id: user._id.toString(),
       email: user.email,
       firstName: user.firstName,
-      lastName: user.lastName
+      lastName: user.lastName,
+      name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+      role: userRole, // ⚠️ IMPORTANT: Include role
+      roles: [userRole], // Array format
+      profile: {
+        department: user.department,
+        subject: user.subject,
+      }
     };
   } catch (error) {
-    return { error: "Invalid token" };
+    console.error('❌ User-info endpoint error:', error.message);
+    return { error: "Failed to get user info" };
   }
 }
+  // --- Role Management Endpoints ---
+  @Get("user-roles") 
+  getUserRoles(@Req() req: Request) {
+    return {
+      roles: {
+        ADMIN: 'Admin',
+        TEACHER: 'Teacher', 
+        HEAD_OF_DEPARTMENT: 'Head_Department',
+        STUDENT: 'Student'
+      },
+      permissions: {
+        'Admin': [
+          'manage_users', 
+          'manage_courses', 
+          'view_reports', 
+          'manage_system',
+          'edit_content',
+          'delete_content',
+          'view_all_data',
+          'manage_departments',
+          'approve_budgets'
+        ],
+        'Teacher': [
+          'manage_courses', 
+          'edit_content', 
+          'view_students',
+          'grade_assignments',
+          'create_assignments'
+        ], 
+        'Head_Department': [
+          'manage_department_courses', 
+          'manage_department_teachers',
+          'view_department_reports',
+          'edit_department_content',
+          'approve_department_requests',
+          'view_department_data',
+          'schedule_classes'
+        ],
+        'Student': [
+          'view_courses', 
+          'submit_assignments', 
+          'view_grades',
+          'view_profile'
+        ]
+      }
+    };
+  }
+@Get()
+  @UseGuards(JwtAuthGuard)
+  async getUsers(@CurrentUser() user: User) {
+    console.log('Current user:', user);
+    return this.usersService.getUsers();
+  }
 
-  @Post("sso-login")
-  async ssoAutoLogin(
-    @Req() req: Request,
-    @Res() res: Response,
-    @Body("returnUrl") returnUrl?: string
+  // Change user role
+  @Post('change-role2')
+  async changeRole(
+    @Body('userId') userId: string,
+    @Body('role') role: 'Admin' | 'Teacher' | 'Head_Department' | 'Student',
+    @Res() res: Response
   ) {
     try {
-      const result = await this.ssoService.autoLoginFromSSO(req, res, returnUrl);
-      
-      if (result.success) {
-        if (returnUrl && result.redirectUrl) {
-          return res.redirect(result.redirectUrl);
-        } else {
-          return res.json({
-            success: true,
-            user: result.user,
-            accessToken: result.tokens?.accessToken,
-            refreshToken: result.tokens?.refreshToken
-          });
-        }
-      } else {
-        return res.status(401).json({
+      if (!userId) {
+        return res.status(400).json({
           success: false,
-          message: "No valid SSO session found"
+          message: 'User ID is required'
         });
       }
+
+      if (!role) {
+        return res.status(400).json({
+          success: false,
+          message: 'Role is required'
+        });
+      }
+
+      const updatedUser = await this.usersService.updateUserRole(userId, role);
+
+      return res.json({
+        success: true,
+        message: 'Role updated successfully',
+        user: {
+          id: updatedUser._id,
+          email: updatedUser.email,
+          firstName: updatedUser.firstName,
+          lastName: updatedUser.lastName,
+          role: updatedUser.role
+        }
+      });
+    } catch (error) {
+      return res.status(error.status || 500).json({
+        success: false,
+        message: error.message || 'Failed to update role'
+      });
+    }
+  }
+
+  // --- Enhanced Current User Session ---
+  @Get("me")
+  async getCurrentUser(@Req() req: Request, @Res() res: Response) {
+    console.log('🔍 Checking current user session...');
+    
+    try {
+      // Check for authentication token in cookies
+      const token = req.cookies?.Authentication || req.cookies?.sso_token;
+      
+      if (!token) {
+        console.log('❌ No auth token found in cookies');
+        return res.status(401).json({ authenticated: false });
+      }
+      
+      // Verify the token
+      const payload = this.jwtService.verify(token, {
+        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+      });
+      
+      // Get user details with role
+      const user = await this.usersService.findOneById(payload.userId);
+      
+      if (!user) {
+        console.log('❌ User not found for ID:', payload.userId);
+        return res.status(401).json({ authenticated: false });
+      }
+      
+      const userRole = user.role || 'Student';
+      
+      return res.json({
+        authenticated: true,
+        user: {
+          id: user._id.toString(),
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+          role: userRole,
+          profile: {
+            department: user.department,
+            subject: user.subject,
+          }
+        },
+        role: userRole,
+        roles: [userRole],
+        id: user._id.toString()
+      });
+      
+    } catch (error) {
+      console.log('❌ Session check failed:', error.message);
+      return res.status(401).json({ authenticated: false });
+    }
+  }
+
+  // --- Enhanced Fresh Tokens with Role ---
+  @Get("token")
+  async getFreshTokens(@Req() req: Request, @Res() res: Response) {
+    console.log('🔄 Fresh token request...');
+    
+    try {
+      // Check for existing authentication
+      const token = req.cookies?.Authentication || req.cookies?.sso_token;
+      
+      if (!token) {
+        console.log('❌ No auth token for fresh token generation');
+        return res.status(401).json({ error: 'Not authenticated' });
+      }
+      
+      // Verify current token
+      const payload = this.jwtService.verify(token, {
+        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+      });
+      
+      // Get user with role
+      const user = await this.usersService.findOneById(payload.userId);
+      
+      if (!user) {
+        console.log('❌ User not found for fresh tokens');
+        return res.status(401).json({ error: 'User not found' });
+      }
+      
+      // Generate fresh tokens
+      const tokens = await this.authService.generateTokens(user);
+      const userRole = user.role || 'Student';
+      
+      return res.json({
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        user_id: user._id.toString(),
+        role: userRole,
+        user: {
+          id: user._id.toString(),
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+          role: userRole,
+          profile: {
+            department: user.department,
+            subject: user.subject,
+          }
+        }
+      });
+      
+    } catch (error) {
+      console.log('❌ Fresh token generation failed:', error.message);
+      return res.status(401).json({ error: 'Failed to generate fresh tokens' });
+    }
+  }
+
+  // --- Vue.js API Login Endpoint ---
+  @Post("api-login")
+  async apiLogin(@Body() loginDto: LoginDto, @Res() res: Response) {
+    try {
+      // Validate user
+      const user = await this.authService.validateUser(loginDto.email, loginDto.password);
+      
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: "Invalid credentials"
+        });
+      }
+
+      // Generate tokens
+      const tokens = await this.authService.generateTokens(user);
+      
+      // Get user role
+      const userRole = user.role || 'Student';
+      
+      // Enhanced user data for Vue frontend
+      const enhancedUser = {
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+        role: userRole,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        profile: {
+          department: user.department,
+          subject: user.subject,
+        }
+      };
+
+      return res.json({
+        message: "Login successful",
+        success: true,
+        user: enhancedUser,
+        roles: [userRole], // Array format for compatibility
+        role: userRole,
+        token: tokens.accessToken,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken
+      });
+
+    } catch (error) {
+      return res.status(401).json({
+        success: false,
+        message: error.message || "Login failed"
+      });
+    }
+  }
+
+  // --- Create Test Users Endpoint ---
+  @Post("create-test-users")
+  async createTestUsers(@Res() res: Response) {
+    try {
+      const testUsers = [
+        {
+          email: 'admin@rtc.edu.kh',
+          password: 'admin123',
+          firstName: 'System',
+          lastName: 'Administrator',
+          role: 'Admin' as const
+        },
+        {
+          email: 'teacher@rtc.edu.kh',
+          password: 'teacher123',
+          firstName: 'John',
+          lastName: 'Teacher',
+          role: 'Teacher' as const,
+          subject: 'Mathematics'
+        },
+        {
+          email: 'hod@rtc.edu.kh',
+          password: 'hod123',
+          firstName: 'Jane',
+          lastName: 'Department Head',
+          role: 'Head_Department' as const,
+          department: 'Science Department'
+        },
+        {
+          email: 'student@rtc.edu.kh',
+          password: 'student123',
+          firstName: 'Alice',
+          lastName: 'Student',
+          role: 'Student' as const
+        }
+      ];
+
+      const createdUsers: Array<{
+        email: string;
+        role: string;
+        status: string;
+        error?: string;
+      }> = [];
+      
+      for (const userData of testUsers) {
+        try {
+          // Check if user already exists
+          const existingUser = await this.usersService.findOneByEmail(userData.email);
+          if (!existingUser) {
+            const user = await this.authService.register(userData);
+            createdUsers.push({
+              email: userData.email,
+              role: userData.role,
+              status: 'created'
+            });
+          } else {
+            createdUsers.push({
+              email: userData.email,
+              role: userData.role,
+              status: 'already exists'
+            });
+          }
+        } catch (error) {
+          createdUsers.push({
+            email: userData.email,
+            role: userData.role,
+            status: 'error',
+            error: error.message
+          });
+        }
+      }
+
+      return res.json({
+        message: "Test users creation completed",
+        users: createdUsers
+      });
+
     } catch (error) {
       return res.status(500).json({
-        success: false,
-        message: "SSO auto-login failed",
+        message: "Failed to create test users",
         error: error.message
       });
     }
   }
 
-  // --- Refresh token ---
-  @Post("refresh")
-  @UseGuards(JwtRefreshAuthGuard)
-  async refreshToken(@CurrentUser() user: User, @Res() res: Response) {
-    const result = await this.authService.refresh(user, res);
-    return res.json(result);
+  // [Keep all your existing methods below - verify-token, token-login, logout, etc.]
+  
+@Get("verify-token")
+async verifyTokenForPHP(
+  @Query('token') queryToken: string, 
+  @Req() req: Request,
+  @Res() res: Response  // Add Response to set CORS headers
+) {
+  // Set CORS headers explicitly
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  console.log('🔍 Laravel verify-token request received');
+  console.log('🔍 Origin:', req.headers.origin);
+  
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.status(200).json({ valid: false, message: "Preflight OK" });
   }
 
-  // --- Token-login ---
+  // Extract token from multiple sources
+  let token = queryToken;
+
+  // Check Authorization header
+  if (!token && req.headers.authorization) {
+    const authHeader = req.headers.authorization;
+    token = authHeader.startsWith('Bearer ') 
+      ? authHeader.substring(7) 
+      : authHeader;
+    console.log('🔍 Token from Authorization header');
+  }
+
+  if (!token) {
+    console.log('❌ No token provided');
+    return res.status(401).json({ 
+      valid: false, 
+      message: "No token provided" 
+    });
+  }
+
+  try {
+    console.log('🔍 Verifying token...');
+    
+    // Verify JWT
+    const payload = this.jwtService.verify(token, {
+      secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
+    });
+    
+    console.log('✅ Token verified, userId:', payload.userId);
+    
+    // Get user from database
+    const user = await this.usersService.findOneById(payload.userId);
+    
+    if (!user) {
+      console.log('❌ User not found');
+      return res.status(401).json({ 
+        valid: false, 
+        message: "User not found" 
+      });
+    }
+
+    console.log('✅ User found:', user.email, 'Role:', user.role);
+    
+    // IMPORTANT: Return format matching Laravel expectations
+    return res.json({ 
+      valid: true,
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        firstName: user.firstName || '',
+        lastName: user.lastName || '',
+        name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+        role: user.role || 'Student',  // Single role
+        roles: [user.role || 'Student'], // Array format
+        department: user.department || null,
+        subject: user.subject || null
+      },
+      token: token,  // Return the same token
+      accessToken: token
+    });
+    
+  } catch (error) {
+    console.log('❌ Token verification failed:', error.message);
+    
+    let errorMessage = "Token verification failed";
+    if (error.name === 'TokenExpiredError') {
+      errorMessage = "Token expired";
+    } else if (error.name === 'JsonWebTokenError') {
+      errorMessage = "Invalid token";
+    }
+    
+    return res.status(401).json({ 
+      valid: false, 
+      message: errorMessage,
+      error: error.message 
+    });
+  }
+}
+
   @Post("token-login")
   async loginWithToken(@Body() body: TokenLoginDto, @Res() res: Response) {
     const { token, type } = body;
@@ -255,333 +750,13 @@ async getUserInfo(@Query('token') token: string) {
     return res.json(result);
   }
 
-  // --- Verify token ---
-@Get("verify-token")
-async verifyTokenForPHP(@Query('token') token: string, @Req() req: Request) {
-  console.log('🔐 Token verification request received');
-  console.log('Request URL:', req.url);
-  console.log('Query parameters:', req.query);
-  console.log('HTTP Method:', req.method);
-  
-  // Handle OPTIONS requests (CORS preflight)
-  if (req.method === 'OPTIONS') {
-    return { valid: false, message: "Preflight request" };
+  @Post("refresh")
+  @UseGuards(JwtRefreshAuthGuard)
+  async refreshToken(@CurrentUser() user: User, @Res() res: Response) {
+    const result = await this.authService.refresh(user, res);
+    return res.json(result);
   }
 
-  if (!token) {
-    console.log('❌ No token provided in query parameters');
-    console.log('Full request details:', {
-      url: req.url,
-      method: req.method,
-      headers: req.headers,
-      query: req.query
-    });
-    return { valid: false, message: "No token provided" };
-  }
-
-  // Remove "Bearer " prefix if present
-  if (token.startsWith('Bearer ')) {
-    token = token.substring(7);
-  }
-
-  try {
-    const isValid = await this.authService.verifyAccessToken(token);
-    console.log('✅ Token valid:', isValid);
-    return { valid: isValid };
-  } catch (error) {
-    console.log('❌ Token verification failed:', error.message);
-    return { valid: false, message: "Token verification failed" };
-  }
-}
-@Get("debug-verify")
-async debugVerify(@Query('token') token: string, @Req() req: Request) {
-  console.log('=== DEBUG TOKEN VERIFICATION ===');
-  
-  // Get token from query or header
-  if (!token) {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-    }
-  }
-
-  if (!token) {
-    return { error: "No token provided" };
-  }
-
-  console.log('Token received:', token.substring(0, 50) + '...');
-  
-  try {
-    // 1. First test pure JWT verification
-    const secret = this.configService.get('JWT_ACCESS_TOKEN_SECRET');
-    console.log('JWT Secret available:', !!secret);
-    
-    const payload = this.jwtService.verify(token, { secret });
-    console.log('✅ Pure JWT verification successful:', payload);
-    
-    // 2. Test user lookup
-    const user = await this.usersService.findOneById(payload.userId);
-    console.log('User found:', !!user);
-    
-    if (!user) {
-      return { 
-        valid: false, 
-        reason: "User not found", 
-        userId: payload.userId,
-        jwtValid: true 
-      };
-    }
-    
-    // 3. Check user status
-    const userObj = this.toPlainObject(user);
-    const isActive = userObj.isActive !== false;
-    console.log('User active:', isActive);
-    
-    if (!isActive) {
-      return { 
-        valid: false, 
-        reason: "User not active", 
-        userId: payload.userId,
-        jwtValid: true,
-        userFound: true
-      };
-    }
-    
-    return { 
-      valid: true, 
-      user: { id: user._id, email: userObj.email, active: isActive },
-      jwtValid: true,
-      userFound: true,
-      userActive: true
-    };
-    
-  } catch (error) {
-    console.log('❌ Verification failed:', error.message);
-    
-    if (error.name === 'JsonWebTokenError') {
-      return { 
-        valid: false, 
-        reason: "JWT Error", 
-        error: error.message,
-        possibleCause: "Secret mismatch or invalid token format"
-      };
-    }
-    
-    if (error.name === 'TokenExpiredError') {
-      return { 
-        valid: false, 
-        reason: "Token Expired", 
-        error: error.message,
-        expiredAt: error.expiredAt
-      };
-    }
-    
-    return { 
-      valid: false, 
-      reason: "Other Error", 
-      error: error.message 
-    };
-  }
-}
-@Get("check-cookie")
-checkCookie(@Req() req: Request) {
-  const ssoToken = req.cookies?.sso_token;
-  const authToken = req.cookies?.Authentication;
-  
-  console.log('🍪 SSO Token from cookie:', ssoToken);
-  console.log('📏 SSO Token length:', ssoToken?.length);
-  console.log('🔢 SSO Token parts:', ssoToken?.split('.').length);
-  
-  console.log('🍪 Auth Token from cookie:', authToken);
-  console.log('📏 Auth Token length:', authToken?.length);
-  console.log('🔢 Auth Token parts:', authToken?.split('.').length);
-  
-  return {
-    ssoToken: {
-      exists: !!ssoToken,
-      length: ssoToken?.length,
-      parts: ssoToken?.split('.').length,
-      preview: ssoToken ? ssoToken.substring(0, 50) + '...' : null
-    },
-    authToken: {
-      exists: !!authToken,
-      length: authToken?.length,
-      parts: authToken?.split('.').length,
-      preview: authToken ? authToken.substring(0, 50) + '...' : null
-    }
-  };
-}
-@Get("inspect-token")
-inspectToken(@Query('token') token: string, @Req() req: Request) {
-  // Get token from header if not in query
-  if (!token) {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-    }
-  }
-
-  if (!token) {
-    return { error: "No token provided" };
-  }
-
-  console.log('=== TOKEN INSPECTION ===');
-  console.log('Full token:', token);
-  console.log('Token length:', token.length);
-  console.log('Token parts:', token.split('.').length);
-  
-  // Check if it looks like a JWT
-  const parts = token.split('.');
-  const isJWTFormat = parts.length === 3;
-  
-  let header, payload;
-  try {
-    if (parts.length >= 1) header = JSON.parse(Buffer.from(parts[0], 'base64').toString());
-    if (parts.length >= 2) payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-  } catch (e) {
-    console.log('Failed to parse JWT parts:', e.message);
-  }
-
-  return {
-    tokenLength: token.length,
-    partsCount: parts.length,
-    isJWTFormat: isJWTFormat,
-    header: header,
-    payload: payload,
-    first50Chars: token.substring(0, 50),
-    last50Chars: token.substring(token.length - 50)
-  };
-}
-@Get("  generate-test-token")
-generateTestToken() {
-  const payload = { 
-    userId: '68b931b5321c0629a7881546', 
-    email: 'test@example.com',
-    timestamp: Date.now()
-  };
-  
-  const token = this.jwtService.sign(payload, {
-    secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET'),
-    expiresIn: '1h'
-  });
-  
-  console.log('Generated token length:', token.length);
-  console.log('Generated token parts:', token.split('.').length);
-  
-  return {
-    token: token,
-    length: token.length,
-    parts: token.split('.').length,
-    header: JSON.parse(Buffer.from(token.split('.')[0], 'base64').toString()),
-    payload: JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString())
-  };
-}
-  // --- Enhanced token checking ---
-   @Get("check-token")
-  async checkToken(@Query('token') token: string) {
-    if (!token) {
-      return { valid: false, message: "No token provided" };
-    }
-
-    try {
-      const payload = this.jwtService.verify(token, {
-        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
-      });
-      
-      const user = await this.usersService.getUser({ _id: payload.userId });
-      
-      if (!user) {
-        return { valid: false, message: "User not found" };
-      }
-      
-      return {
-        valid: true,
-        user: {
-          id: user._id,
-          email: user.email,
-        },
-        message: "Token is valid"
-      };
-    } catch (error) {
-      return { valid: false, message: "Invalid or expired token" };
-    }
-  }
-
-
-  // --- Token status ---
-  @Get("token-status")
-  checkTokenStatus(@Req() req: Request) {
-    const token = this.extractTokenFromHeader(req);
-
-    if (!token) {
-      return { isLoggedIn: false, message: "No token provided" };
-    }
-
-    try {
-      const payload = this.jwtService.verify(token, {
-        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
-      });
-      return {
-        isLoggedIn: true,
-        user: {
-          id: payload.sub || payload.userId,
-          email: payload.email,
-          roles: payload.roles,
-        },
-        expiresAt: new Date(payload.exp * 1000),
-      };
-    } catch (error) {
-      return {
-        isLoggedIn: false,
-        message: "Invalid or expired token",
-        error: error.message,
-      };
-    }
-  }
-
-  // --- Sessions ---
-  @Get("sessions")
-  @UseGuards(JwtAuthGuard)
-  async getUserSessions(@CurrentUser() user: any) {
-    const sessions = await this.sessionService.getUserSessions(user.sub);
-    return {
-      sessions: sessions.map((session) => ({
-        deviceId: session.deviceId,
-        deviceInfo: session.deviceInfo,
-        lastActivity: session.lastActivity,
-        createdAt: session.createdAt,
-        isCurrentSession: session.accessToken === user.accessToken,
-      })),
-    };
-  }
- @Get("verify")
-  async verify(@Req() req: CustomRequest, @Res() res: Response) {
-    const token = req.cookies?.Authentication || req.cookies?.sso_session;
-
-    if (!token) {
-      return res.status(401).json({ loggedIn: false });
-    }
-
-    try {
-      const payload = this.jwtService.verify(token, {
-        secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET'),
-      });
-
-      return res.json({
-        loggedIn: true,
-        user: {
-          id: payload.userId || payload.sub,
-          email: payload.email,
-          roles: payload.roles,
-        },
-        accessToken: token,
-      });
-    } catch (err) {
-      return res.status(401).json({ loggedIn: false, message: "Invalid or expired token" });
-    }
-  }
-
-// Standard API logout (protected with JWT)
   @UseGuards(JwtAuthGuard)
   @Post("logout")
   async logout(
@@ -592,19 +767,15 @@ generateTestToken() {
     try {
       const token = this.extractTokenFromHeader(req);
       
-      // Invalidate session and tokens
       if (token) {
         await this.sessionService.invalidateSession(token);
       }
       
-      // Clear all auth cookies
       res.clearCookie('Authentication');
       res.clearCookie('Refresh');
       res.clearCookie('sso_token');
       
-      // If returnUrl provided, redirect without tokens
       if (returnUrl) {
-        // Clean the returnUrl by removing any existing token parameters
         const cleanUrl = this.removeTokenParams(returnUrl);
         return res.redirect(cleanUrl);
       }
@@ -617,7 +788,6 @@ generateTestToken() {
     } catch (error) {
       console.error('Logout error:', error);
       
-      // Still attempt to redirect even if error
       if (returnUrl) {
         const cleanUrl = this.removeTokenParams(returnUrl);
         return res.redirect(cleanUrl);
@@ -628,198 +798,39 @@ generateTestToken() {
   }
 
   private removeTokenParams(url: string): string {
-  try {
-    const urlObj = new URL(url);
-    
-    // Remove token-related parameters
-    const paramsToRemove = [
-      'accessToken', 'refreshToken', 'token', 
-      'logout', 'error', 'message'
-    ];
-    
-    paramsToRemove.forEach(param => {
-      urlObj.searchParams.delete(param);
-    });
-    
-    // Add logout success parameter
-    urlObj.searchParams.set('logout', 'success');
-    
-    return urlObj.toString();
-  } catch (error) {
-    // If URL parsing fails, return original URL without obvious token params
-    return url
-      .replace(/[?&]accessToken=[^&]*/g, '')
-      .replace(/[?&]refreshToken=[^&]*/g, '')
-      .replace(/[?&]token=[^&]*/g, '')
-      + '?logout=success';
-  }
-}
-
-  // Optional GET logout (for SSO flows / PHP style)
-  @Get('logout')
-  async logoutGet(@Req() req: Request, @Res() res: Response, @Query('returnUrl') returnUrl?: string) {
-    const userId = (req as any).user?.userId; // if JWT guard not used, may be undefined
-
-    if (userId) {
-      await this.authService.logout(userId, res);
-    } else {
-      res.clearCookie('token');
-      res.clearCookie('Authentication');
+    try {
+      const urlObj = new URL(url);
+      
+      const paramsToRemove = [
+        'accessToken', 'refreshToken', 'token', 
+        'logout', 'error', 'message'
+      ];
+      
+      paramsToRemove.forEach(param => {
+        urlObj.searchParams.delete(param);
+      });
+      
+      urlObj.searchParams.set('logout', 'success');
+      
+      return urlObj.toString();
+    } catch (error) {
+      return url
+        .replace(/[?&]accessToken=[^&]*/g, '')
+        .replace(/[?&]refreshToken=[^&]*/g, '')
+        .replace(/[?&]token=[^&]*/g, '')
+        + '?logout=success';
     }
-
-    if (returnUrl) {
-      const safeUrl = await this.authService.validateReturnUrl(returnUrl);
-      if (safeUrl) {
-        return res.redirect(safeUrl);
-      }
-    }
-
-    return res.json({ message: 'Logged out successfully (GET)' });
   }
 
-// Add these two methods to your AuthController class
-// Place them anywhere within the @Controller("auth") class, preferably near your other GET endpoints
-
-// 1. Check current user session (for auto-login detection)
-@Get("me")
-async getCurrentUser(@Req() req: Request, @Res() res: Response) {
-  console.log('🔍 Checking current user session...');
-  console.log('Cookies:', req.cookies);
-  
-  try {
-    // Check for authentication token in cookies
-    const token = req.cookies?.Authentication || req.cookies?.sso_token;
+  private extractTokenFromHeader(request: Request): string | undefined {
+    const authHeader = request.headers.authorization;
+    if (!authHeader) return undefined;
     
-    if (!token) {
-      console.log('❌ No auth token found in cookies');
-      return res.status(401).json({ authenticated: false });
-    }
-    
-    // Verify the token
-    const payload = this.jwtService.verify(token, {
-      secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
-    });
-    
-    console.log('✅ Token verified, payload:', payload);
-    
-    // Get user details
-    const user = await this.usersService.findOneById(payload.userId);
-    
-    if (!user) {
-      console.log('❌ User not found for ID:', payload.userId);
-      return res.status(401).json({ authenticated: false });
-    }
-    
-    console.log('✅ User found:', user.email);
-    
-    return res.json({
-      authenticated: true,
-      user: {
-        id: user._id.toString(),
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName
-      },
-      id: user._id.toString() // PHP code expects this at root level too
-    });
-    
-  } catch (error) {
-    console.log('❌ Session check failed:', error.message);
-    return res.status(401).json({ authenticated: false });
+    const [type, token] = authHeader.split(" ");
+    return type === "Bearer" ? token : undefined;
   }
-}
 
-// 2. Get fresh tokens for authenticated user
-@Get("token")
-async getFreshTokens(@Req() req: Request, @Res() res: Response) {
-  console.log('🔄 Fresh token request...');
-  
-  try {
-    // Check for existing authentication
-    const token = req.cookies?.Authentication || req.cookies?.sso_token;
-    
-    if (!token) {
-      console.log('❌ No auth token for fresh token generation');
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-    
-    // Verify current token
-    const payload = this.jwtService.verify(token, {
-      secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET')
-    });
-    
-    // Get user
-    const user = await this.usersService.findOneById(payload.userId);
-    
-    if (!user) {
-      console.log('❌ User not found for fresh tokens');
-      return res.status(401).json({ error: 'User not found' });
-    }
-    
-    // Generate fresh tokens using your existing method
-    const tokens = await this.authService.generateTokens(user);
-    
-    console.log('✅ Fresh tokens generated for user:', user.email);
-    
-    return res.json({
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-      user_id: user._id.toString(),
-      user: {
-        id: user._id.toString(),
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName
-      }
-    });
-    
-  } catch (error) {
-    console.log('❌ Fresh token generation failed:', error.message);
-    return res.status(401).json({ error: 'Failed to generate fresh tokens' });
+  private toPlainObject(obj: any): any {
+    return JSON.parse(JSON.stringify(obj));
   }
-}
-  // @Get("device-status")
-  // async checkDeviceStatus(@Req() req: CustomRequest) {
-  //   const deviceInfo = req.deviceInfo;
-  //  const deviceId = this.sessionService.generateDeviceId(deviceInfo);
-  // const hasActiveSession = await this.sessionService.hasActiveSession(deviceId);
-
-  // return {
-  //      deviceId,
-  //     hasActiveSession,
-  //     deviceInfo,
-  //   };
-  //  }
-
- 
-  // --- Helper methods ---
-  // private extractTokenFromHeader(request: Request): string | undefined {
-  //   const authHeader = request.headers.authorization;
-  //   if (!authHeader) return undefined;
-    
-  //   const [type, token] = authHeader.split(" ");
-  //   // Fix the typo: "Bearer" not "Btoken"
-  //   return type === "Bearer" ? token : undefined;
-  // }
-
-  // // private getErrorMessage(errorCode?: string): string {
-  //   switch (errorCode) {
-  //     case '1': return 'Invalid credentials';
-  //     case '2': return 'Session expired';
-  //     case 'missing_credentials': return 'Please fill in all fields';
-  //     case 'invalid_credentials': return 'Invalid email or password';
-  //     case 'login_failed': return 'Login failed. Please try again.';
-  //     default: return errorCode || '';
-  //   }
-  // }
-
-  // private getErrorCode(error: any): string {
-  //   if (error.message?.includes('Invalid credentials')) {
-  //     return '1';
-  //   }
-  //   if (error.message?.includes('expired')) {
-  //     return '2';
-  //   }
-  //   return 'login_failed';
-  // 
 }

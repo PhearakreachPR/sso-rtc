@@ -8,7 +8,7 @@ export class Session extends Document {
 
   @Prop({ required: true, unique: true })
   deviceId: string;
-
+  
   @Prop({
     type: {
       userAgent: { type: String, required: true },

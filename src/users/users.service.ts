@@ -26,6 +26,7 @@ export class UsersService {
       password: hashedPassword,
       isActive: true,
       createdAt: new Date(),
+      role: data.role || 'Student', // Add role support
     };
 
     // Add optional fields if provided
@@ -35,16 +36,24 @@ export class UsersService {
     if (data.lastName) {
       userData.lastName = data.lastName.trim();
     }
+    if (data.department) {
+      userData.department = data.department.trim();
+    }
+    if (data.subject) {
+      userData.subject = data.subject.trim();
+    }
 
     const newUser = new this.userModel(userData);
     return newUser.save();
-  }
-
+}
   async findByEmail(email: string): Promise<UserDocument | null> {
     return this.userModel.findOne({ 
       email: email.toLowerCase().trim() 
     }).exec();
   }
+async findOneByEmail(email: string): Promise<UserDocument | null> {
+  return this.findByEmail(email);
+}
 
   async getUsers(): Promise<UserDocument[]> {
     return this.userModel
@@ -222,4 +231,24 @@ export class UsersService {
       .limit(limit)
       .exec();
   }
+  async updateUserRole(userId: string, role: 'Admin' | 'Teacher' | 'Head_Department' | 'Student') {
+  const validRoles = ['Admin', 'Teacher', 'Head_Department', 'Student'];
+
+  if (!validRoles.includes(role)) {
+    throw new ConflictException(`Invalid role. Must be one of: ${validRoles.join(', ')}`);
+  }
+
+  const updatedUser = await this.userModel.findByIdAndUpdate(
+    userId,
+    { $set: { role } },
+    { new: true }
+  ).exec();
+
+  if (!updatedUser) {
+    throw new NotFoundException('User not found');
+  }
+
+  return updatedUser;
+}
+
 }

@@ -17,6 +17,43 @@ async function bootstrap() {
   app.setBaseViewsDir(join(__dirname, "..", "views"));
   app.setViewEngine("hbs");
 
+  
+  // CORS configuration
+  app.enableCors({
+    origin: function (origin, callback) {
+      const allowedOrigins = [
+        "http://localhost:3000",
+        "http://localhost:8000", 
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+        "https://rtc-bb.camai.kh",
+        "http://localhost:6000",
+        "http://localhost:5000"
+      ];
+      
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        console.log('Blocked by CORS:', origin);
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allowedHeaders: [
+      'Origin', 
+      'X-Requested-With', 
+      'Content-Type', 
+      'Accept', 
+      'Authorization',
+      'X-API-Key'
+    ],
+  });
+
   // Global validation
   app.useGlobalPipes(new ValidationPipe({ 
     whitelist: true, 
@@ -27,34 +64,10 @@ async function bootstrap() {
   // Cookie parser
   app.use(cookieParser(process.env.COOKIE_SECRET || "your-secret-key"));
 
-  // CORS - Enable for all origins to mimic PHP behavior
-  app.enableCors({
-  origin: [
-    "http://localhost:3000",
-    "http://localhost:3001", 
-    "http://localhost:5000",
-    "http://localhost:60000",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
-    "http://127.0.0.1:5000", 
-    "http://127.0.0.1:60000",
-    "http://localhost"
-  ],
-  credentials: true, // ← This is crucial!
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-});
-  // Add middleware to handle PHP-like behavior
-  app.use((req, res, next) => {
-    // Set headers similar to PHP
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    
-    // Handle PHP-like session behavior
-    if (!req.session) {
-      req.session = {};
-    }
-    
-    next();
-  });
+  // Trust proxy if production
+  if (process.env.NODE_ENV === "production") {
+    app.set("trust proxy", 1);
+  }
 
   // MongoDB connection
   try {
@@ -65,15 +78,15 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  // Trust proxy if production
-  if (process.env.NODE_ENV === "production") {
-    app.set("trust proxy", 1);
-  }
-
   const port = process.env.PORT || 3000;
   await app.listen(port);
 
-  console.log(`🚀 Server running on http://localhost:${port}`);
+  console.log(`🚀 SSO Server running on: http://localhost:${port}`);
+  console.log(`🔐 Available endpoints:`);
+  console.log(`   - GET  http://localhost:${port}/auth/login`);
+  console.log(`   - POST http://localhost:${port}/auth/login`);
+  console.log(`   - GET  http://localhost:${port}/auth/verify-token`);
+  console.log(`   - GET  http://localhost:${port}/auth/user-info`);
 }
 bootstrap().catch(err => {
   console.error("🛑 Bootstrap failed:", err);

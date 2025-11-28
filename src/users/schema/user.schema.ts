@@ -21,12 +21,27 @@ export class User {
   @Prop({ required: false, trim: true })
   lastName?: string;
 
+  @Prop()
+  name?: string;
+
   @Prop({ default: true })
   isActive: boolean;
 
-  @Prop({ type: [{ type: Types.ObjectId, ref: 'Role' }], default: [] })
+   @Prop({ type: [{ type: Types.ObjectId, ref: 'Role' }], default: [] })
   roles: Types.ObjectId[];
 
+  @Prop({ 
+    enum: ['Admin', 'Teacher', 'Head_Department', 'Student'],
+    default: 'Student'
+  })
+  role: string;
+
+  @Prop()
+  department?: string;
+
+  @Prop()
+  subject?: string;
+  
   @Prop()
   refreshToken?: string;
 

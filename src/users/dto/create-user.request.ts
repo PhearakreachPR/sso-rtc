@@ -1,4 +1,5 @@
-import { IsEmail, IsOptional, IsString, MinLength } from "class-validator";
+// src/users/dto/create-user.request.ts
+import { IsEmail, IsOptional, IsString, MinLength, IsIn } from "class-validator";
 
 export class createUserRequest {
     @IsEmail({}, { message: 'Please provide a valid email address' })
@@ -17,4 +18,19 @@ export class createUserRequest {
     @IsString({ message: 'Last name must be a string' })
     @MinLength(1, { message: 'Last name cannot be empty' })
     lastName?: string;
+
+    // Add role field
+    @IsOptional()
+    @IsIn(['Admin', 'Teacher', 'Head_Department', 'Student'], { 
+        message: 'Role must be one of: Admin, Teacher, Head_Department, Student' 
+    })
+    role?: 'Admin' | 'Teacher' | 'Head_Department' | 'Student';
+
+    @IsOptional()
+    @IsString()
+    department?: string;
+
+    @IsOptional()
+    @IsString()
+    subject?: string;
 }
